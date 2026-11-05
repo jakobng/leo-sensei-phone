@@ -2774,6 +2774,7 @@ var deckProgress = (context, deck) => ((cards) => ((states) => ((total) => ((sta
   context.catalog.cards.filter((card) => card.provenance?.jlpt?.deckIds?.includes(deck.id) || card.provenance?.customListId === deck.id)
 );
 var syncedLibrary = (manifest, plan) => usesLegacyDeckDocuments(manifest) ? void 0 : plan.library;
+var studyLibraryPending = (manifest, plan) => !usesLegacyDeckDocuments(manifest) && !syncedLibrary(manifest, plan) && Object.keys(plan.dailyLimits).some((id) => id.startsWith("jlpt-"));
 var studyDecks = (manifest, plan) => [
   ...(syncedLibrary(manifest, plan)?.decks.map((deck) => ({ ...deck, cards: deck.items.length })) ?? normalizedDecks(manifest)).map((deck) => ({
     ...deck,
@@ -2791,6 +2792,7 @@ var validStudyListLimits = (manifest, plan, limits) => limits !== null && typeof
   /* @__PURE__ */ new Set([...studyDecks(manifest, plan).map(({ id }) => id), ...grammarStudyListIds])
 );
 var publicStudyLists = (context, manifest, plan = emptyStudyPlan) => ({
+  libraryPending: studyLibraryPending(manifest, plan),
   lists: studyDecks(manifest, plan).map((deck) => ({
     id: deck.id,
     label: deck.title,
@@ -3007,7 +3009,7 @@ var apiHandler = ({
   };
   const persistStudyPlan = (plan, callback) => readLearnerState({ files: files2 }, (stateResult) => stateResult.ok ? writeLearnerState({ files: files2, state: { ...stateResult.value, studyPlan: normalizedStudyPlan(plan) } }, callback) : callback(stateResult));
   const respondWithStudyLists = (status, plan, callback = () => void 0) => persistStudyPlan(plan, (written) => written.ok ? load((loaded) => loaded.ok ? readJsonFile(join(decksDir, "manifest.json"), (manifestResult) => manifestResult.ok ? (sendJson(response, status, publicStudyLists(loaded.value, manifestResult.value, normalizedStudyPlan(plan))), callback()) : sendJson(response, 503, { error: "DECKS_UNAVAILABLE", message: manifestResult.error })) : sendJson(response, 503, { error: "STATE_UNAVAILABLE", message: loaded.error })) : sendJson(response, 500, { error: "STUDY_PLAN_WRITE_FAILED", message: written.error?.message ?? written.error }));
-  const postStudyLists = () => readJsonBody(request, (bodyResult) => bodyResult.ok ? readStudyPlan(studyPlanFile, (planResult) => !planResult.ok ? sendJson(response, 503, { error: "STUDY_PLAN_UNAVAILABLE", message: planResult.error }) : readJsonFile(join(decksDir, "manifest.json"), (manifestResult) => ((selection) => !manifestResult.ok ? sendJson(response, 503, { error: "DECKS_UNAVAILABLE", message: manifestResult.error }) : !selection.ok ? sendJson(response, 400, { error: "INVALID_STUDY_LISTS", message: selection.error }) : readDeckDocuments(decksDir, selection.value, (documentsResult) => documentsResult.ok ? readLearnerState({ files: files2 }, (stateResult) => stateResult.ok ? validStudyListLimits(manifestResult.value, normalizedStudyPlan(stateResult.value.studyPlan), bodyResult.value.dailyLimits) ? ((installed) => installed.ok ? writeLearnerState({ files: files2, state: installed.value }, (writeResult) => writeResult.ok ? sendJson(response, 200, {
+  const postStudyLists = () => readJsonBody(request, (bodyResult) => bodyResult.ok ? readStudyPlan(studyPlanFile, (planResult) => !planResult.ok ? sendJson(response, 503, { error: "STUDY_PLAN_UNAVAILABLE", message: planResult.error }) : readJsonFile(join(decksDir, "manifest.json"), (manifestResult) => ((selection) => !manifestResult.ok ? sendJson(response, 503, { error: "DECKS_UNAVAILABLE", message: manifestResult.error }) : studyLibraryPending(manifestResult.value, planResult.value) ? sendJson(response, 409, { error: "STUDY_LIBRARY_PENDING", message: "Sync your study lists before changing the daily plan." }) : !selection.ok ? sendJson(response, 400, { error: "INVALID_STUDY_LISTS", message: selection.error }) : readDeckDocuments(decksDir, selection.value, (documentsResult) => documentsResult.ok ? readLearnerState({ files: files2 }, (stateResult) => stateResult.ok ? validStudyListLimits(manifestResult.value, normalizedStudyPlan(stateResult.value.studyPlan), bodyResult.value.dailyLimits) ? ((installed) => installed.ok ? writeLearnerState({ files: files2, state: installed.value }, (writeResult) => writeResult.ok ? sendJson(response, 200, {
     installedCards: installed.value.catalog.cards.length - stateResult.value.catalog.cards.length,
     settings: installed.value.settings,
     studyPlan: installed.value.studyPlan
@@ -3494,7 +3496,7 @@ isMain ? createReviewServer().listen(
 // web/worker.mjs
 var scope = new URL(self.registration.scope);
 var cachePrefix = `leo-sensei:${scope.href}:`;
-var cacheName = cachePrefix + "41ce8d67ba273b6c9cae674b";
+var cacheName = cachePrefix + "e84790632d6f98151140da7f";
 var assets = define_ASSETS_default.map((path) => new URL(path, scope).href);
 var shell = new URL("index.html", scope);
 var handle = createReviewServer({

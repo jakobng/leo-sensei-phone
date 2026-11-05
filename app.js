@@ -85,7 +85,9 @@ const studySync = syncEnabled ? createStudySync({
   readLocal: () => fetchValue("/api/sync/state"),
   applyLocal: (data) => fetchValue("/api/sync/state", jsonMutationOptions("POST", data)),
   canApply: () => allowSyncApply,
-  onApplied: () => allowSyncApply ? bootstrap("Study progress synced.", syncView === "settings" ? "settings" : null) : null,
+  onApplied: () => allowSyncApply
+    ? bootstrap("Study progress synced.", ["settings", "lists"].includes(syncView) ? syncView : null)
+    : null,
 }) : null;
 
 const phaseName = (phase) => ({ reading: "Reading", meaning: "Meaning", reverse: "Japanese" })[phase] ?? "Answer";
@@ -389,7 +391,7 @@ const settingsFieldsMarkup = (state, { formId, onboarding = false, submitLabel }
     <fieldset class="form-section">
       <legend>New words</legend>
       <p>Set New / day for each list. Use 0 to pause a list. You can add your own list after setup.</p>
-      ${dailyNewMarkup(state, true)}
+      ${state.studyLibraryPending ? "<p>Your daily plan will be available here after your study lists sync.</p>" : dailyNewMarkup(state, true)}
       <p class="source-note">Unofficial lists. The JLPT does not publish official vocabulary lists.</p>
     </fieldset>
     <fieldset class="form-section">
@@ -561,12 +563,15 @@ const studyListsMarkup = (state) => state.studyListDetail
   : `${managementHeaderMarkup(state, "Study lists")}
     <main class="management-main study-lists-main">
       ${state.notice ? `<div class="notice-band" role="status">${escapeHtml(state.notice)}</div>` : ""}
-      <form id="studyListsForm" class="study-lists-form">
+      ${state.studyLibraryPending ? `<section class="data-pane">
+        <p>Sync to load the kanji and vocabulary lists from your Mac.</p>
+        ${syncEnabled ? syncPanelMarkup : ""}
+      </section>` : `<form id="studyListsForm" class="study-lists-form">
         <section class="study-list-group"><div class="study-list-group-heading"><h2>Vocab &amp; Kanji</h2><span>New cards per day by list</span></div>${studyListGridMarkup(state)}</section>
         ${state.error ? `<div class="form-error" role="alert">${escapeHtml(state.error)}</div>` : ""}
         <div class="form-submit"><button class="primary-button" type="submit">Save daily plan</button></div>
       </form>
-      <section class="add-list-section"><h2>Add your own list</h2><form id="customStudyListForm" class="custom-study-list-form"><label>List name<input name="name" placeholder="Travel words" required /></label>${listImportFieldsMarkup("Create list")}</form></section>
+      <section class="add-list-section"><h2>Add your own list</h2><form id="customStudyListForm" class="custom-study-list-form"><label>List name<input name="name" placeholder="Travel words" required /></label>${listImportFieldsMarkup("Create list")}</form></section>`}
     </main>`;
 
 const settingsMarkup = (state) => `
@@ -680,6 +685,7 @@ const stateWithDaily = (state, daily, settings = state.settings) => ({
   settings,
   decks: state.decks,
   studyLists: state.studyLists,
+  studyLibraryPending: state.studyLibraryPending,
   browserCandidates: state.browserCandidates,
   applicationCandidates: state.applicationCandidates,
   gateBehavior: state.gateBehavior,
@@ -717,6 +723,7 @@ const openView = (state, view) => view === "review"
             ...state,
             view,
             studyLists: lists.value.lists,
+            studyLibraryPending: lists.value.libraryPending,
             studyListDetail: view === "lists" ? null : state.studyListDetail,
             studyListSort: view === "lists" ? "default" : state.studyListSort,
             error: null,
@@ -735,6 +742,7 @@ const openView = (state, view) => view === "review"
             ...stateWithDaily(state, daily.value),
             view,
             studyLists: lists.value.lists,
+            studyLibraryPending: lists.value.libraryPending,
             error: null,
             notice: null,
           })
@@ -819,9 +827,10 @@ const render = (state) => {
   root.innerHTML = state.daily && state.settings ? pageMarkup(state, feedbackReferences.get(displayedCardId), comparisonOpen) : '<div class="loading">Loading today’s session</div>';
   const wasAllowed = allowSyncApply;
   syncView = state.view;
-  allowSyncApply = Boolean(state.settings && ["home", "settings", "onboarding"].includes(syncView) && !state.submitting);
+  const waitingForLists = syncView === "lists" && state.studyLibraryPending && !state.studyListDetail;
+  allowSyncApply = Boolean(state.settings && (["home", "settings", "onboarding"].includes(syncView) || waitingForLists) && !state.submitting);
   studySync?.attach(root.querySelector("[data-sync-panel]"));
-  if (allowSyncApply && !wasAllowed) studySync?.schedule(0);
+  if (allowSyncApply && (!wasAllowed || waitingForLists)) studySync?.schedule(0);
   const transition = (event) => render(reduceUi(state, event));
   const reloadStudyList = (lists, listId) => fetchJson(
     `/api/study-lists/${encodeURIComponent(listId)}/items`,
@@ -1162,6 +1171,7 @@ const hydrateBootstrap = (initialState, expectedNode) => Promise.all([
     ...initialState,
     decks: decksResult.ok ? decksResult.value.decks : [],
     studyLists: listsResult.ok ? listsResult.value.lists : [],
+    studyLibraryPending: listsResult.ok && listsResult.value.libraryPending,
     browserCandidates,
     applicationCandidates: candidates.filter(({ identity }) => !browserIds.has(identity)),
     gateBehavior,
@@ -1197,7 +1207,7 @@ const bootstrap = (notice = null, preferredView = null) => Promise.all([
   fetchValue("/api/settings"),
   fetchValue("/api/daily"),
 ]).then(([settingsResult, dailyResult]) => settingsResult.ok && dailyResult.ok
-  ? ((initialState) => settingsResult.value.onboardingComplete
+  ? ((initialState) => settingsResult.value.onboardingComplete && preferredView !== "lists"
       ? (render(initialState), hydrateBootstrap(initialState, root.firstElementChild))
       : hydrateBootstrap(initialState, root.firstElementChild))({
       ...initialUiState(dailyResult.value),
