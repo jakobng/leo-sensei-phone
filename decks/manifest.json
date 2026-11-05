@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "disclaimer": "Unofficial community approximations; the JLPT does not publish official vocabulary lists.",
+  "source": {
+    "name": "open-anki-jlpt-decks",
+    "repository": "https://github.com/jamsinclair/open-anki-jlpt-decks",
+    "commit": "1ad66734417aca9dbcca6b2d5ee440cb13ab3ba0",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2020 Jamie Sinclair"
+  },
+  "decks": [
+    {
+      "id": "n5-vocabulary",
+      "file": "n5-vocabulary.json",
+      "title": "Approximate JLPT N5 Vocabulary",
+      "level": "N5",
+      "cards": 718,
+      "unofficial": true,
+      "sha256": "d978652d0389d4765292ecec98d76bcd76eb55885d3401052501b48c577646ed"
+    },
+    {
+      "id": "n4-vocabulary",
+      "file": "n4-vocabulary.json",
+      "title": "Approximate JLPT N4 Vocabulary",
+      "level": "N4",
+      "cards": 668,
+      "unofficial": true,
+      "sha256": "edfe11397a542bdeba763c16b6084873c6b352f2e20be821e21c7704f436e334"
+    },
+    {
+      "id": "n3-vocabulary",
+      "file": "n3-vocabulary.json",
+      "title": "Approximate JLPT N3 Vocabulary",
+      "level": "N3",
+      "cards": 2140,
+      "unofficial": true,
+      "sha256": "63344233773df3d2c11e761e866182e4519b64cf40c7340ca28acf23a6ac10b9"
+    },
+    {
+      "id": "n2-vocabulary",
+      "file": "n2-vocabulary.json",
+      "title": "Approximate JLPT N2 Vocabulary",
+      "level": "N2",
+      "cards": 1906,
+      "unofficial": true,
+      "sha256": "5abf50b6647c8ef07e06e31d4e1e1978e4a5ce225e30f5a9d92464b89b0871f7"
+    },
+    {
+      "id": "n1-vocabulary",
+      "file": "n1-vocabulary.json",
+      "title": "Approximate JLPT N1 Vocabulary",
+      "level": "N1",
+      "cards": 2699,
+      "unofficial": true,
+      "sha256": "af2942768a6e5300d5358d73f9b800d180e173d3d4990b7978b34639697b48cf"
+    }
+  ]
+}

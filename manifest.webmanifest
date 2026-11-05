@@ -1,0 +1,22 @@
+{
+  "id": "./",
+  "name": "Leo Sensei の-nonsense 日本語",
+  "short_name": "Leo Sensei",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#fbf8f1",
+  "theme_color": "#e0a20c",
+  "icons": [
+    {
+      "src": "./app-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "./app-icon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
