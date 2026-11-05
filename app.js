@@ -135,7 +135,7 @@ const headerMarkup = (state) => `
       <span class="brand-mark" lang="ja">日</span><span>Japanese Study</span>
     </button>
     <div class="topbar-status">
-      <button class="statistics-button" data-view="lists" type="button" title="Open study lists"><span aria-hidden="true">≡</span><span>Study lists</span></button>
+      <button class="statistics-button study-lists-button" data-view="lists" type="button" title="Open study lists"><span aria-hidden="true">≡</span><span>Study lists</span></button>
       ${browserBuild || state.daily.complete ? "" : '<button id="bypassButton" class="quiet-button" type="button">Emergency unlock</button>'}
       <details class="utility-menu"><summary class="icon-button" title="More" aria-label="More"><span aria-hidden="true">•••</span></summary><div>${browserBuild ? "" : '<button data-view="voice" type="button">Voice</button>'}<button data-view="settings" type="button">Settings</button><button data-view="sources" type="button">Sources</button></div></details>
     </div>
@@ -712,10 +712,9 @@ const openView = (state, view) => view === "review"
       ? render({ ...stateWithDaily(state, daily.value), view: "review", error: null, notice: null })
       : render({ ...state, error: daily.error }))
   : ["settings", "lists"].includes(view)
-    ? Promise.all([fetchValue("/api/daily"), fetchValue("/api/study-lists")])
-      .then(([daily, lists]) => daily.ok && lists.ok
+    ? fetchValue("/api/study-lists").then((lists) => lists.ok
         ? render({
-            ...stateWithDaily(state, daily.value),
+            ...state,
             view,
             studyLists: lists.value.lists,
             studyListDetail: view === "lists" ? null : state.studyListDetail,
@@ -723,7 +722,7 @@ const openView = (state, view) => view === "review"
             error: null,
             notice: null,
           })
-        : render({ ...state, error: [daily, lists].find((result) => !result.ok)?.error }))
+        : render({ ...state, error: lists.error }))
   : view === "home"
     ? ((statsRequest) => Promise.all([fetchValue("/api/daily"), fetchValue("/api/study-lists")])
       .then(([daily, lists]) => daily.ok && lists.ok

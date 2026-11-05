@@ -138,7 +138,9 @@ export const mergeStudy = (base, local, remote) => {
   const settings = mergeFields(base.settings, local.settings, remote.settings, "the same study setting");
   const catalog = mergeCatalog(base.catalog, local.catalog, remote.catalog);
   const customLists = mergeValue(base.customLists, local.customLists, remote.customLists, "the imported lists");
-  const studyPlan = mergeValue(base.studyPlan, local.studyPlan, remote.studyPlan, "the study lists");
+  const studyPlan = base.studyPlan && local.studyPlan && remote.studyPlan
+    ? mergeFields(base.studyPlan, local.studyPlan, remote.studyPlan, "the study lists")
+    : mergeValue(base.studyPlan, local.studyPlan, remote.studyPlan, "the study lists");
   return {
     version: 2, events, settings, catalog, customLists,
     ...(studyPlan === undefined ? {} : { studyPlan }),

@@ -48,7 +48,7 @@ const validState = (state) => state?.version === 2 && Array.isArray(state.events
   && Array.isArray(state.catalog?.cards) && Array.isArray(state.customLists) && state.settings;
 
 export const syncStudyOnce = ({ config, readLocal, applyLocal, canApply, vault = createGitHubVault(config) }, retries = 2) =>
-  Promise.all([readLocal(), vault.read()]).then(([local, remote]) => {
+  Promise.all([readLocal(), vault.read({ sha: config.remoteSha, state: config.base })]).then(([local, remote]) => {
     if (!local.ok) throw syncError(local);
     if (remote && !validState(remote.state)) throw new Error("The cloud copy is incomplete.");
     const remoteStudy = remote && portableStudy(remote.state);
@@ -57,12 +57,13 @@ export const syncStudyOnce = ({ config, readLocal, applyLocal, canApply, vault =
     const changedRemote = !remoteStudy || !studyContains(remoteStudy, merged);
     if (changedLocal && !canApply()) return { deferred: true };
     const push = changedRemote ? vault.write(merged, remote?.sha) : Promise.resolve();
-    return push.then(() => {
-      if (!changedLocal) return { base: merged, changedLocal };
+    return push.then((written) => {
+      const remoteSha = changedRemote ? written?.content?.sha : remote?.sha;
+      if (!changedLocal) return { base: merged, changedLocal, remoteSha };
       if (!canApply()) return { deferred: true };
       return applyLocal({ revision: local.value.revision, state: merged }).then((applied) => {
         if (!applied.ok) throw syncError(applied);
-        return { base: merged, changedLocal };
+        return { base: merged, changedLocal, remoteSha };
       });
     });
   }).catch((error) => {
@@ -113,7 +114,10 @@ export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onAppl
           return;
         }
         const syncedAt = new Date().toISOString();
-        return store.save({ ...config, base: result.base, syncedAt }).then(() => {
+        const saved = configured && !newConfig && result.remoteSha && result.remoteSha === config.remoteSha && !result.changedLocal
+          ? Promise.resolve()
+          : store.save({ ...config, base: result.base, remoteSha: result.remoteSha, syncedAt });
+        return saved.then(() => {
           configured = true;
           status = `Synced at ${new Date(syncedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`;
           if (result.changedLocal) onApplied();
@@ -127,7 +131,7 @@ export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onAppl
     });
     display();
   };
-  const schedule = (delay = 4000) => {
+  const schedule = (delay = 12000) => {
     if (!configured || !supported) return;
     clearTimeout(timer);
     timer = setTimeout(() => sync(), delay);
@@ -177,7 +181,7 @@ export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onAppl
   });
   globalThis.addEventListener("online", () => schedule(0));
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) schedule(0);
+    schedule(0);
   });
   setInterval(() => { if (!document.hidden && canApply()) sync(); }, 90000);
   return { attach, schedule };

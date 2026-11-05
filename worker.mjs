@@ -14,22 +14,70 @@ var decoder = new TextDecoder();
 var storage;
 var files;
 var before;
+var changes;
+var chunkCounts = /* @__PURE__ */ new Map();
+var separator = "\0";
+var maxChunks = 512;
 var missing = (path) => Object.assign(new Error(`File not found: ${path}`), { code: "ENOENT" });
 var openStorage = () => new Promise((resolve, reject) => {
-  const request = indexedDB.open(`leo-sensei:${self.registration.scope}`, 1);
-  request.onupgradeneeded = () => request.result.createObjectStore("study");
-  request.onsuccess = () => resolve(request.result);
+  const request = indexedDB.open(`leo-sensei:${self.registration.scope}`, 2);
+  request.onupgradeneeded = () => {
+    const db = request.result;
+    const filesStore = db.createObjectStore("files");
+    if (db.objectStoreNames.contains("study")) {
+      const legacy = request.transaction.objectStore("study").get("files");
+      legacy.onsuccess = () => {
+        [...legacy.result ?? /* @__PURE__ */ new Map()].map(([path, content]) => filesStore.put(content, path));
+        db.deleteObjectStore("study");
+      };
+    }
+  };
+  request.onsuccess = () => {
+    const db = request.result;
+    db.onversionchange = () => db.close();
+    resolve(db);
+  };
   request.onerror = () => reject(request.error);
 });
 var loadFiles = (db) => new Promise((resolve, reject) => {
-  const request = db.transaction("study").objectStore("study").get("files");
-  request.onsuccess = () => resolve(request.result ?? /* @__PURE__ */ new Map());
-  request.onerror = () => reject(request.error);
+  const transaction = db.transaction("files");
+  const store = transaction.objectStore("files");
+  const keys = store.getAllKeys();
+  const values = store.getAll();
+  transaction.oncomplete = () => {
+    const parts = /* @__PURE__ */ new Map();
+    keys.result.map((key, index) => {
+      const [path, chunk] = key.split(separator);
+      if (!parts.has(path)) parts.set(path, []);
+      parts.get(path).push(values.result[index]);
+      if (chunk) chunkCounts.set(path, Number(chunk));
+    });
+    resolve(new Map([...parts].map(([path, entries]) => [path, entries.length === 1 ? entries[0] : entries.join("")])));
+  };
+  transaction.onabort = () => reject(transaction.error);
 });
-var saveFiles = (db) => new Promise((resolve, reject) => {
-  const transaction = db.transaction("study", "readwrite");
-  transaction.objectStore("study").put(files, "files");
-  transaction.oncomplete = resolve;
+var saveFiles = (db, pending) => new Promise((resolve, reject) => {
+  const transaction = db.transaction("files", "readwrite");
+  const store = transaction.objectStore("files");
+  const nextCounts = new Map(chunkCounts);
+  [...pending].map(([path, change]) => {
+    const count = nextCounts.get(path) ?? 0;
+    const prefix = path + separator;
+    if (change.append !== void 0 && count < maxChunks) {
+      const next = count + 1;
+      store.put(change.append, prefix + String(next).padStart(4, "0"));
+      nextCounts.set(path, next);
+      return;
+    }
+    if (count) store.delete(IDBKeyRange.bound(prefix, prefix + "\uFFFF"));
+    nextCounts.delete(path);
+    if (files.has(path)) store.put(files.get(path), path);
+    else store.delete(path);
+  });
+  transaction.oncomplete = () => {
+    chunkCounts = nextCounts;
+    resolve();
+  };
   transaction.onabort = () => reject(transaction.error);
 });
 var beginFiles = () => (storage ??= openStorage().catch((error3) => {
@@ -38,16 +86,19 @@ var beginFiles = () => (storage ??= openStorage().catch((error3) => {
 })).then((db) => files ?? loadFiles(db)).then((loaded) => {
   files = loaded;
   before = null;
+  changes = null;
 });
 var finishFiles = (keep) => {
   if (!before) return Promise.resolve();
   const original = before;
+  const pending = changes;
   before = null;
+  changes = null;
   if (!keep) {
     files = original;
     return Promise.resolve();
   }
-  return storage.then(saveFiles).catch((error3) => {
+  return storage.then((db) => saveFiles(db, pending)).catch((error3) => {
     files = original;
     throw error3;
   });
@@ -63,9 +114,12 @@ var readBytes = (path) => {
   return files.has(path) ? Promise.resolve(files.get(path)) : Promise.reject(missing(path));
 };
 var resultToCallback = (promise, callback) => promise.then((value) => callback(null, value), callback);
-var set = (path, value) => {
+var set = (path, value, append) => {
   if (!path.startsWith(statePrefix)) throw new Error("Study data path is read only.");
   before ??= new Map(files);
+  changes ??= /* @__PURE__ */ new Map();
+  const previous = changes.get(path);
+  changes.set(path, { append: append !== void 0 && (!previous || previous.append !== void 0) ? (previous?.append ?? "") + append : void 0 });
   if (value === void 0) files.delete(path);
   else files.set(path, value);
 };
@@ -74,7 +128,7 @@ var readFile = (path, encoding, callback = encoding) => resultToCallback(
   callback
 );
 var writeFile = (path, value, encoding, callback = encoding) => resultToCallback(Promise.resolve().then(() => set(path, value)), callback);
-var appendFile = (path, value, encoding, callback = encoding) => resultToCallback(Promise.resolve().then(() => set(path, (files.get(path) ?? "") + value)), callback);
+var appendFile = (path, value, encoding, callback = encoding) => resultToCallback(Promise.resolve().then(() => set(path, (files.get(path) ?? "") + value, value)), callback);
 var mkdir = (_path, _options, callback) => queueMicrotask(() => callback(null));
 var rename = (from, to, callback) => resultToCallback(Promise.resolve().then(() => {
   if (!files.has(from)) throw missing(from);
@@ -1483,6 +1537,53 @@ var readReferenceForCard = (path, card) => readStudyReference(path).then((index)
   }));
 });
 
+// scripts/lib/storage.mjs
+var errorResult = (code) => (error3) => ({
+  ok: false,
+  error: { code, message: error3 instanceof Error ? error3.message : String(error3) }
+});
+var parseJsonLines = (text3, callback) => Promise.resolve().then(() => callback(String(text3).split(/\r?\n/u).reduce((result, line, index) => {
+  if (!result.ok || !line.trim()) return result;
+  try {
+    result.value.push(JSON.parse(line));
+    return result;
+  } catch {
+    return { ok: false, error: { code: "INVALID_JSONL", line: index + 1 } };
+  }
+}, { ok: true, value: [] })));
+var remember = (cache, path, entry, limit) => {
+  cache.delete(path);
+  cache.set(path, entry);
+  if (cache.size > limit) cache.delete(cache.keys().next().value);
+};
+var jsonDocuments = /* @__PURE__ */ new Map();
+var parseStoredJson = (path, text3, callback) => {
+  const cached = jsonDocuments.get(path);
+  return cached?.text === text3 ? callback(cached.result) : parseJsonResult(text3, (result) => {
+    if (result.ok) remember(jsonDocuments, path, { text: text3, result }, 16);
+    return callback(result);
+  });
+};
+var eventLogs = /* @__PURE__ */ new Map();
+var parseStoredEvents = (path, text3, callback) => {
+  const cached = eventLogs.get(path);
+  if (cached?.text === text3) return callback({ ok: true, value: cached.events });
+  const append = cached?.text.endsWith("\n") && text3.startsWith(cached.text);
+  return parseJsonLines(append ? text3.slice(cached.text.length) : text3, (result) => {
+    if (!result.ok) return callback(append ? { ...result, error: { ...result.error, line: result.error.line + cached.lineCount } } : result);
+    const events = append ? cached.events.concat(result.value) : result.value;
+    const addedText = append ? text3.slice(cached.text.length) : text3;
+    const lineCount = (append ? cached.lineCount : 0) + (addedText.match(/\n/gu)?.length ?? 0);
+    remember(eventLogs, path, { text: text3, events, lineCount }, 3);
+    return callback({ ok: true, value: events });
+  });
+};
+var readJsonLines = (path, callback) => readFile(path, "utf8", (error3, text3) => error3?.code === "ENOENT" ? callback({ ok: true, value: [] }) : error3 ? callback(errorResult("READ_FAILED")(error3)) : parseStoredEvents(path, text3, callback));
+var appendJsonLine = (path, value, callback) => Promise.resolve(value).then(JSON.stringify).then((line) => mkdir(dirname(path), { recursive: true }, (directoryError) => directoryError ? callback(errorResult("CREATE_STATE_DIRECTORY_FAILED")(directoryError)) : appendFile(path, `${line}
+`, { encoding: "utf8", flag: "a" }, (appendError) => callback(
+  appendError ? errorResult("APPEND_FAILED")(appendError) : { ok: true, value }
+)))).catch((error3) => callback(errorResult("SERIALIZE_FAILED")(error3)));
+
 // scripts/lib/settings-core.mjs
 var gateModes = /* @__PURE__ */ new Set(["off", "prompt", "redirect"]);
 var freeze = (value) => value && typeof value === "object" ? (Object.values(value).map(freeze), Object.freeze(value)) : value;
@@ -1543,7 +1644,6 @@ var freeze2 = (value) => value && typeof value === "object" ? (Object.values(val
 var error = (code, message, details = []) => ({ ok: false, error: { code, message, details } });
 var hash2 = (value) => createHash("sha256").update(value).digest("hex").slice(0, 16);
 var parseJson = (text3, callback) => Promise.resolve(text3).then(JSON.parse).then((value) => callback({ ok: true, value })).catch((parseError) => callback(error("INVALID_JSON", parseError.message)));
-var parseJsonLines = (text3, callback) => Promise.all(String(text3).split(/\r?\n/u).filter((line) => line.trim().length > 0).map((line) => Promise.resolve(line).then(JSON.parse))).then((value) => callback({ ok: true, value })).catch((parseError) => callback(error("INVALID_EVENTS", parseError.message)));
 var parseDelimitedRows = (source, delimiter) => ((characters) => ((state) => [
   ...state.rows,
   [...state.row, state.cell]
@@ -1635,8 +1735,11 @@ var record = (value) => value && typeof value === "object" && !Array.isArray(val
 var validGrammar = (grammar) => Boolean(
   record(grammar) && Number(grammar.version) === 1 && Array.isArray(grammar.points) && grammar.points.every((point) => record(point) && typeof point.id === "string")
 );
+var validStudyLibrary = (library) => Boolean(
+  record(library) && library.version === 1 && Array.isArray(library.knownIds) && library.knownIds.every((id) => typeof id === "string") && Array.isArray(library.decks) && new Set(library.decks.map((deck) => deck?.id)).size === library.decks.length && library.decks.every((deck) => record(deck) && typeof deck.id === "string" && deck.id.startsWith("jlpt-") && typeof deck.title === "string" && Array.isArray(deck.items) && deck.items.every((item) => record(item) && typeof item._id === "string" && typeof item.item === "string" && ["kanji", "vocabulary"].includes(item.type) && [item._key, item.reading, item.mainReading, item.meaning].every((value) => typeof value === "string")))
+);
 var validStudyPlan = (studyPlan) => Boolean(
-  record(studyPlan) && Number(studyPlan.version) === 2 && record(studyPlan.dailyLimits) && Array.isArray(studyPlan.customLists) && record(studyPlan.customAdditions)
+  record(studyPlan) && Number(studyPlan.version) === 2 && record(studyPlan.dailyLimits) && Array.isArray(studyPlan.customLists) && record(studyPlan.customAdditions) && (studyPlan.library === void 0 || validStudyLibrary(studyPlan.library))
 );
 var has = (value, key) => Boolean(value && Object.hasOwn(value, key));
 var validateBackup = (backup) => ((settingsResult) => ((details) => details.length > 0 ? error("INVALID_BACKUP", "Backup validation failed.", details) : {
@@ -1693,14 +1796,17 @@ var readLearnerState = ({ files: files2 }, callback) => readOptional(
   files2.settingsFile,
   {},
   parseJson,
-  (settingsResult) => settingsResult.ok ? readOptional(files2.catalogFile, { version: 1, cards: [] }, parseJson, (catalogResult) => catalogResult.ok ? readOptional(files2.customListsFile, [], parseJson, (listsResult) => listsResult.ok ? readOptional(files2.eventsFile, [], parseJsonLines, (eventsResult) => eventsResult.ok ? readParityDocuments(files2, (parityResult) => callback(parityResult.ok ? validateBackup({
+  (settingsResult) => settingsResult.ok ? readOptional(files2.catalogFile, { version: 1, cards: [] }, parseJson, (catalogResult) => catalogResult.ok ? readOptional(files2.customListsFile, [], parseJson, (listsResult) => listsResult.ok ? readJsonLines(files2.eventsFile, (eventsResult) => eventsResult.ok ? readParityDocuments(files2, (parityResult) => callback(parityResult.ok ? validateBackup({
     version: 2,
     settings: settingsResult.value,
     catalog: catalogResult.value,
     customLists: listsResult.value,
     events: eventsResult.value,
     ...parityResult.value
-  }) : parityResult)) : callback(eventsResult)) : callback(listsResult)) : callback(catalogResult)) : callback(settingsResult)
+  }) : parityResult)) : callback(error(
+    eventsResult.error.code === "INVALID_JSONL" ? "INVALID_EVENTS" : "READ_FAILED",
+    eventsResult.error.message ?? `Invalid JSON on event line ${eventsResult.error.line}.`
+  ))) : callback(listsResult)) : callback(catalogResult)) : callback(settingsResult)
 );
 var mapSeries = (items, transform, callback, values = []) => items.length === 0 ? callback({ ok: true, value: values }) : transform(items[0], (result) => result.ok ? mapSeries(items.slice(1), transform, callback, [...values, result.value]) : callback({ ...result, completed: values }));
 var ensureDirectories = (paths, callback) => mapSeries(
@@ -1766,26 +1872,6 @@ var restoreBackup = ({ backup, files: files2, now = (/* @__PURE__ */ new Date())
   )) : callback(preserved)
 ))(join(dirname(files2.settingsFile), "backups", `pre-restore-${now.replaceAll(":", "-")}.json`)) : callback(current)) : callback(validated))(validateBackup(backup));
 
-// scripts/lib/storage.mjs
-var errorResult = (code) => (error3) => ({
-  ok: false,
-  error: { code, message: error3 instanceof Error ? error3.message : String(error3) }
-});
-var parseJsonLines2 = (text3, callback) => Promise.resolve().then(() => callback(String(text3).split(/\r?\n/u).reduce((result, line, index) => {
-  if (!result.ok || !line.trim()) return result;
-  try {
-    result.value.push(JSON.parse(line));
-    return result;
-  } catch {
-    return { ok: false, error: { code: "INVALID_JSONL", line: index + 1 } };
-  }
-}, { ok: true, value: [] })));
-var readJsonLines = (path, callback) => readFile(path, "utf8", (error3, text3) => error3?.code === "ENOENT" ? callback({ ok: true, value: [] }) : error3 ? callback(errorResult("READ_FAILED")(error3)) : parseJsonLines2(text3, callback));
-var appendJsonLine = (path, value, callback) => Promise.resolve(value).then(JSON.stringify).then((line) => mkdir(dirname(path), { recursive: true }, (directoryError) => directoryError ? callback(errorResult("CREATE_STATE_DIRECTORY_FAILED")(directoryError)) : appendFile(path, `${line}
-`, { encoding: "utf8", flag: "a" }, (appendError) => callback(
-  appendError ? errorResult("APPEND_FAILED")(appendError) : { ok: true, value }
-)))).catch((error3) => callback(errorResult("SERIALIZE_FAILED")(error3)));
-
 // scripts/lib/kanji-lexicon.mjs
 var hasKanji2 = (value) => /[\u4e00-\u9fff]/u.test(String(value ?? ""));
 var uniqueText = (valuesToNormalize) => [...new Set(valuesToNormalize.map((value) => String(value ?? "").trim()).filter(Boolean))];
@@ -1824,11 +1910,11 @@ var writeCatalog = (path, catalog, callback) => ((temporary) => writeFile(
     renameError ? error2(renameError.message) : { ok: true, value: catalog }
   ))
 ))(`${path}.tmp`);
-var readJson = (path, callback) => readFile(path, "utf8", (readError, text3) => readError ? callback(error2(readError.message)) : parseJsonResult(text3, callback));
-var readCatalog = (path, callback) => readFile(path, "utf8", (readError, text3) => readError?.code === "ENOENT" ? callback({ ok: true, value: structuredClone(emptyCatalog) }) : readError ? callback(error2(readError.message)) : parseJsonResult(text3, (result) => callback(
+var readJson = (path, callback) => readFile(path, "utf8", (readError, text3) => readError ? callback(error2(readError.message)) : parseStoredJson(path, text3, callback));
+var readCatalog = (path, callback) => readFile(path, "utf8", (readError, text3) => readError?.code === "ENOENT" ? callback({ ok: true, value: structuredClone(emptyCatalog) }) : readError ? callback(error2(readError.message)) : parseStoredJson(path, text3, (result) => callback(
   result.ok && Array.isArray(result.value?.cards) ? result : error2(result.ok ? "Catalog cards must be an array." : result.error)
 )));
-var readSettings = (path, callback) => path ? readFile(path, "utf8", (readError, text3) => readError?.code === "ENOENT" ? callback({ ok: true, value: defaultLearnerSettings() }) : readError ? callback(error2(readError.message)) : parseJsonResult(text3, (result) => ((normalized) => callback(
+var readSettings = (path, callback) => path ? readFile(path, "utf8", (readError, text3) => readError?.code === "ENOENT" ? callback({ ok: true, value: defaultLearnerSettings() }) : readError ? callback(error2(readError.message)) : parseStoredJson(path, text3, (result) => ((normalized) => callback(
   result.ok && normalized.ok ? normalized : error2(result.ok ? normalized.error.issues.map(({ message }) => message).join(" ") : result.error)
 ))(result.ok ? normalizeLearnerSettings(result.value) : result))) : callback({ ok: true, value: defaultLearnerSettings() });
 var dailyContext = ({ catalog, events, kanjiLexicon = {}, now, settings, studyPlan, timeZone }) => {
@@ -1973,7 +2059,8 @@ var selectLessonCards = ({ cardsById, decks, existingIds, reofferableIds, knownI
   }))(selectableLessonItems(deck, existingIds, reofferableIds, knownIds, selectedIds)),
   { cards: [], selectedIds: /* @__PURE__ */ new Set() }
 ).cards;
-var startLesson = ({ context, catalogFile, dailyPlan = false, more = false, eventsFile, deckFile, knownFile, deckId, limit = 10, now = (/* @__PURE__ */ new Date()).toISOString(), plans }, callback) => readJson(knownFile, (knownResult) => readLessonDecks(normalizedLessonPlans({ deckFile, deckId, limit, plans })).then((decks) => {
+var readKnownItems = (file, ids, callback) => ids ? callback({ ok: true, value: { ids } }) : readJson(file, callback);
+var startLesson = ({ context, catalogFile, dailyPlan = false, more = false, eventsFile, deckFile, knownFile, knownIds, deckId, limit = 10, now = (/* @__PURE__ */ new Date()).toISOString(), plans }, callback) => readKnownItems(knownFile, knownIds, (knownResult) => readLessonDecks(normalizedLessonPlans({ deckFile, deckId, limit, plans })).then((decks) => {
   const deckError = decks.map(({ result }) => result).find(({ ok }) => !ok);
   const cardsById = plannedLessonCards(decks, context.kanjiLexicon);
   const reconciledCatalog = reconcileJlptMemberships(context.catalog, cardsById);
@@ -2508,7 +2595,8 @@ var normalizedStudyPlan = (value = {}) => ({
   version: 2,
   dailyLimits: value?.dailyLimits && typeof value.dailyLimits === "object" ? value.dailyLimits : {},
   customLists: Array.isArray(value?.customLists) ? value.customLists : [],
-  customAdditions: value?.customAdditions && typeof value.customAdditions === "object" ? value.customAdditions : {}
+  customAdditions: value?.customAdditions && typeof value.customAdditions === "object" ? value.customAdditions : {},
+  ...value?.library?.version === 1 ? { library: value.library } : {}
 });
 var deckIdForFile = (file) => String(file ?? "").replace(/\.json$/u, "").replaceAll("---", "-");
 var normalizedDecks = (manifest) => (Array.isArray(manifest?.decks) ? manifest.decks : []).map((deck) => ({
@@ -2621,8 +2709,8 @@ var publicExtra = (context, extra, mode, bypassMinutes, speechAvailable = false,
   })) : []
 });
 var readJsonBody = (request, callback) => text(request).then((body) => parseJsonResult(body || "{}", callback)).catch((bodyError) => callback({ ok: false, error: bodyError.message }));
-var readJsonFile = (path, callback) => readFile(path, "utf8", (readError, source) => readError ? callback({ ok: false, error: readError.message }) : parseJsonResult(source, callback));
-var readOptionalJsonFile = (path, fallback, callback) => readFile(path, "utf8", (readError, source) => readError?.code === "ENOENT" ? callback({ ok: true, value: structuredClone(fallback) }) : readError ? callback({ ok: false, error: readError.message }) : parseJsonResult(source, callback));
+var readJsonFile = (path, callback) => readFile(path, "utf8", (readError, source) => readError ? callback({ ok: false, error: readError.message }) : parseStoredJson(path, source, callback));
+var readOptionalJsonFile = (path, fallback, callback) => readFile(path, "utf8", (readError, source) => readError?.code === "ENOENT" ? callback({ ok: true, value: structuredClone(fallback) }) : readError ? callback({ ok: false, error: readError.message }) : parseStoredJson(path, source, callback));
 var readStudyPlan = (path, callback) => readOptionalJsonFile(path, emptyStudyPlan, (result) => callback(
   result.ok ? { ok: true, value: normalizedStudyPlan(result.value) } : result
 ));
@@ -2670,9 +2758,9 @@ var installedDeckState = (state, deckEntries, documents, studyPlan) => ((cards, 
     }
   }
 }))(documents.flatMap((deck) => deck.cards ?? []), new Set(deckEntries.map(({ id }) => id)));
-var selectedStudyListDecks = (manifest, dailyLimits) => ((entries, unknown) => unknown ? { ok: false, error: `Unknown bundled deck: ${unknown}` } : { ok: true, value: entries.filter(({ id }) => Number(dailyLimits[id] ?? 0) > 0) })(
-  normalizedDecks(manifest),
-  Object.keys(dailyLimits ?? {}).find((id) => !id.startsWith("custom") && !grammarStudyListIds.has(id) && !normalizedDecks(manifest).some((deck) => deck.id === id))
+var selectedStudyListDecks = (manifest, plan, dailyLimits) => ((entries, unknown) => unknown ? { ok: false, error: `Unknown bundled deck: ${unknown}` } : { ok: true, value: entries.filter(({ id }) => Number(dailyLimits[id] ?? 0) > 0) })(
+  studyDecks(manifest, plan).filter(({ file }) => file),
+  Object.keys(dailyLimits ?? {}).find((id) => !grammarStudyListIds.has(id) && !studyDecks(manifest, plan).some((deck) => deck.id === id))
 );
 var deckProgress = (context, deck) => ((cards) => ((states) => ((total) => ((stages) => ((started) => ({
   known: Math.min(cards.filter((card) => states[card.id]?.known).length, total),
@@ -2685,16 +2773,20 @@ var deckProgress = (context, deck) => ((cards) => ((states) => ((total) => ((sta
 ))(Number(deck.cards ?? cards.length) + Number(deck.extraItems?.length ?? 0)))(context.cardStates.cardsById ?? {}))(
   context.catalog.cards.filter((card) => card.provenance?.jlpt?.deckIds?.includes(deck.id) || card.provenance?.customListId === deck.id)
 );
-var studyDecks = (manifest, plan) => [...normalizedDecks(manifest).map((deck) => ({
-  ...deck,
-  extraItems: plan.customAdditions[deck.id] ?? []
-})), ...plan.customLists.map((list) => ({
-  id: list.id,
-  title: list.label,
-  cards: list.items.length,
-  items: list.items,
-  custom: true
-}))];
+var syncedLibrary = (manifest, plan) => usesLegacyDeckDocuments(manifest) ? void 0 : plan.library;
+var studyDecks = (manifest, plan) => [
+  ...(syncedLibrary(manifest, plan)?.decks.map((deck) => ({ ...deck, cards: deck.items.length })) ?? normalizedDecks(manifest)).map((deck) => ({
+    ...deck,
+    extraItems: plan.customAdditions[deck.id] ?? []
+  })),
+  ...plan.customLists.map((list) => ({
+    id: list.id,
+    title: list.label,
+    cards: list.items.length,
+    items: list.items,
+    custom: true
+  }))
+];
 var validStudyListLimits = (manifest, plan, limits) => limits !== null && typeof limits === "object" && !Array.isArray(limits) && ((allowedIds) => Object.entries(limits).every(([id, limit]) => allowedIds.has(id) && dailyLimit(limit) !== null))(
   /* @__PURE__ */ new Set([...studyDecks(manifest, plan).map(({ id }) => id), ...grammarStudyListIds])
 );
@@ -2709,14 +2801,14 @@ var publicStudyLists = (context, manifest, plan = emptyStudyPlan) => ({
   }))
 });
 var itemMeanings = (item) => (Array.isArray(item?.meanings) ? item.meanings : String(item?.meaning ?? "").split(/[;,]/u)).map((meaning) => String(meaning ?? "").trim()).filter(Boolean);
-var studyListItem = (context) => (item) => ((id) => ((card) => ((state) => ({
+var studyListItem = (context, cardsById = new Map(context.catalog.cards.map((card) => [card.id, card]))) => (item) => ((id) => ((card) => ((state) => ({
   id,
   item: String(card?.item ?? item?.item ?? ""),
   reading: String(card?.reading ?? item?.reading ?? item?.mainReading ?? ""),
   meanings: Array.isArray(card?.meanings) ? card.meanings : itemMeanings(item),
   type: String(card?.type ?? item?.type ?? "vocabulary").toLowerCase(),
   level: Number.isInteger(state?.stage) ? state.stage : null
-}))(context.cardStates.cardsById?.[id]))(context.catalog.cards.find(({ id: cardId }) => cardId === id)))(String(item?._id ?? item?.id ?? ""));
+}))(context.cardStates.cardsById?.[id]))(cardsById.get(id)))(String(item?._id ?? item?.id ?? ""));
 var validProgressType = (type) => ["kanji", "vocabulary"].includes(type);
 var progressItems = (context, type, bandId) => ((band) => band && validProgressType(type) ? {
   ok: true,
@@ -2735,9 +2827,31 @@ var progressItems = (context, type, bandId) => ((band) => band && validProgressT
     }).map(studyListItem(context))
   }
 } : { ok: false, error: "Progress category not found." })(progressBandFor(bandId));
-var readStudyListItems = (decksDir, deck, callback) => Array.isArray(deck?.items) ? callback({ ok: true, value: deck.items }) : safeDeckFile(deck?.file) ? readJsonFile(join(decksDir, deck.file), (result) => callback(result.ok ? { ok: true, value: [...result.value.items ?? result.value.cards ?? [], ...deck.extraItems ?? []] } : result)) : callback({ ok: false, error: "Study list has an unsafe file path." });
-var configuredLessonPlans = (manifest, plan, decksDir) => studyDecks(manifest, plan).map((deck) => ({ ...deck, limit: dailyLimit(plan.dailyLimits[deck.id]) ?? 0 })).map(({ file, id, items, extraItems, limit }) => Array.isArray(items) ? { deckId: id, items, limit } : { deckFile: join(decksDir, file), deckId: id, extraItems, limit });
+var readStudyListItems = (decksDir, deck, callback) => Array.isArray(deck?.items) ? callback({ ok: true, value: [...deck.items, ...deck.extraItems ?? []] }) : safeDeckFile(deck?.file) ? readJsonFile(join(decksDir, deck.file), (result) => callback(result.ok ? { ok: true, value: [...result.value.items ?? result.value.cards ?? [], ...deck.extraItems ?? []] } : result)) : callback({ ok: false, error: "Study list has an unsafe file path." });
+var configuredLessonPlans = (manifest, plan, decksDir) => studyDecks(manifest, plan).map((deck) => ({ ...deck, limit: dailyLimit(plan.dailyLimits[deck.id]) ?? 0 })).map(({ file, id, items, extraItems, limit }) => Array.isArray(items) ? { deckId: id, items: [...items, ...extraItems ?? []], limit } : { deckFile: join(decksDir, file), deckId: id, extraItems, limit });
 var usesLegacyDeckDocuments = (manifest) => (manifest.decks ?? []).some((deck) => typeof deck.id !== "string");
+var portableDeckItem = (item) => ({
+  _id: String(item._id),
+  _key: String(item._key ?? ""),
+  item: String(item.item),
+  type: String(item.type ?? "vocabulary").toLowerCase(),
+  reading: String(item.reading ?? item.mainReading ?? ""),
+  mainReading: String(item.mainReading ?? ""),
+  meaning: String(item.meaning ?? "")
+});
+var readLocalStudyLibrary = (decksDir, knownFile, callback) => readJsonFile(join(decksDir, "manifest.json"), (manifest) => !manifest.ok || !usesLegacyDeckDocuments(manifest.value) ? callback({ ok: true, value: void 0 }) : ((decks) => readDeckDocuments(decksDir, decks, (documents) => !documents.ok ? callback(documents) : readJsonFile(knownFile, (known) => {
+  if (!known.ok) return callback(known);
+  const value = {
+    version: 1,
+    knownIds: Array.isArray(known.value.ids) ? known.value.ids.map(String) : [],
+    decks: decks.map(({ id, title }, index) => ({
+      id,
+      title,
+      items: (documents.value[index].items ?? []).filter((item) => item?._id && item?.item).map(portableDeckItem)
+    }))
+  };
+  return callback(validStudyLibrary(value) ? { ok: true, value } : { ok: false, error: "The local study library is invalid." });
+})))(normalizedDecks(manifest.value)));
 var grammarReviewableCount = (value, now) => dueGrammarCardIds({
   cards: value.cards,
   cardStates: value.cardStates,
@@ -2893,7 +3007,7 @@ var apiHandler = ({
   };
   const persistStudyPlan = (plan, callback) => readLearnerState({ files: files2 }, (stateResult) => stateResult.ok ? writeLearnerState({ files: files2, state: { ...stateResult.value, studyPlan: normalizedStudyPlan(plan) } }, callback) : callback(stateResult));
   const respondWithStudyLists = (status, plan, callback = () => void 0) => persistStudyPlan(plan, (written) => written.ok ? load((loaded) => loaded.ok ? readJsonFile(join(decksDir, "manifest.json"), (manifestResult) => manifestResult.ok ? (sendJson(response, status, publicStudyLists(loaded.value, manifestResult.value, normalizedStudyPlan(plan))), callback()) : sendJson(response, 503, { error: "DECKS_UNAVAILABLE", message: manifestResult.error })) : sendJson(response, 503, { error: "STATE_UNAVAILABLE", message: loaded.error })) : sendJson(response, 500, { error: "STUDY_PLAN_WRITE_FAILED", message: written.error?.message ?? written.error }));
-  const postStudyLists = () => readJsonBody(request, (bodyResult) => bodyResult.ok ? readJsonFile(join(decksDir, "manifest.json"), (manifestResult) => ((selection) => !manifestResult.ok ? sendJson(response, 503, { error: "DECKS_UNAVAILABLE", message: manifestResult.error }) : !selection.ok ? sendJson(response, 400, { error: "INVALID_STUDY_LISTS", message: selection.error }) : readDeckDocuments(decksDir, selection.value, (documentsResult) => documentsResult.ok ? readLearnerState({ files: files2 }, (stateResult) => stateResult.ok ? validStudyListLimits(manifestResult.value, normalizedStudyPlan(stateResult.value.studyPlan), bodyResult.value.dailyLimits) ? ((installed) => installed.ok ? writeLearnerState({ files: files2, state: installed.value }, (writeResult) => writeResult.ok ? sendJson(response, 200, {
+  const postStudyLists = () => readJsonBody(request, (bodyResult) => bodyResult.ok ? readStudyPlan(studyPlanFile, (planResult) => !planResult.ok ? sendJson(response, 503, { error: "STUDY_PLAN_UNAVAILABLE", message: planResult.error }) : readJsonFile(join(decksDir, "manifest.json"), (manifestResult) => ((selection) => !manifestResult.ok ? sendJson(response, 503, { error: "DECKS_UNAVAILABLE", message: manifestResult.error }) : !selection.ok ? sendJson(response, 400, { error: "INVALID_STUDY_LISTS", message: selection.error }) : readDeckDocuments(decksDir, selection.value, (documentsResult) => documentsResult.ok ? readLearnerState({ files: files2 }, (stateResult) => stateResult.ok ? validStudyListLimits(manifestResult.value, normalizedStudyPlan(stateResult.value.studyPlan), bodyResult.value.dailyLimits) ? ((installed) => installed.ok ? writeLearnerState({ files: files2, state: installed.value }, (writeResult) => writeResult.ok ? sendJson(response, 200, {
     installedCards: installed.value.catalog.cards.length - stateResult.value.catalog.cards.length,
     settings: installed.value.settings,
     studyPlan: installed.value.studyPlan
@@ -2907,7 +3021,7 @@ var apiHandler = ({
         dailyLimits: Object.fromEntries(Object.entries(bodyResult.value.dailyLimits).map(([id, limit]) => [id, dailyLimit(limit)]))
       }
     )
-  ) : sendJson(response, 400, { error: "INVALID_STUDY_LISTS", message: "Study-list limits are invalid." }) : sendJson(response, 503, { error: "STATE_UNAVAILABLE", message: stateResult.error.message })) : sendJson(response, 503, { error: "DECKS_UNAVAILABLE", message: documentsResult.error })))(manifestResult.ok ? selectedStudyListDecks(manifestResult.value, bodyResult.value.dailyLimits ?? {}) : manifestResult)) : sendJson(response, 400, { error: "INVALID_JSON", message: bodyResult.error }));
+  ) : sendJson(response, 400, { error: "INVALID_STUDY_LISTS", message: "Study-list limits are invalid." }) : sendJson(response, 503, { error: "STATE_UNAVAILABLE", message: stateResult.error.message })) : sendJson(response, 503, { error: "DECKS_UNAVAILABLE", message: documentsResult.error })))(manifestResult.ok ? selectedStudyListDecks(manifestResult.value, planResult.value, bodyResult.value.dailyLimits ?? {}) : manifestResult))) : sendJson(response, 400, { error: "INVALID_JSON", message: bodyResult.error }));
   const postCustomStudyList = () => readJsonBody(request, (bodyResult) => ((list) => !bodyResult.ok ? sendJson(response, 400, { error: "INVALID_JSON", message: bodyResult.error }) : !list.label || list.items.length === 0 ? sendJson(response, 400, { error: "INVALID_CUSTOM_LIST" }) : readStudyPlan(studyPlanFile, (planResult) => planResult.ok ? respondWithStudyLists(201, {
     ...planResult.value,
     customLists: [...planResult.value.customLists, list]
@@ -2922,7 +3036,7 @@ var apiHandler = ({
     customAdditions: { ...planResult.value.customAdditions, [listId]: [...existing, ...items] }
   }))(customItems(list?.id ?? `addition:${listId}`, existing.length, bodyResult.value?.table)))(
     planResult.ok ? planResult.value.customLists.find(({ id }) => id === listId) : null,
-    manifestResult.ok ? normalizedDecks(manifestResult.value).find(({ id }) => id === listId) : null,
+    manifestResult.ok && planResult.ok ? studyDecks(manifestResult.value, planResult.value).find(({ id }) => id === listId) : null,
     planResult.ok ? planResult.value.customLists.find(({ id }) => id === listId)?.items ?? planResult.value.customAdditions[listId] ?? [] : []
   ))));
   const patchCustomStudyList = (listId) => readJsonBody(request, (bodyResult) => readStudyPlan(studyPlanFile, (planResult) => ((label, list) => !bodyResult.ok ? sendJson(response, 400, { error: "INVALID_JSON", message: bodyResult.error }) : !planResult.ok ? sendJson(response, 503, { error: "STUDY_PLAN_UNAVAILABLE", message: planResult.error }) : !list ? sendJson(response, 404, { error: "CUSTOM_LIST_NOT_FOUND" }) : !label ? sendJson(response, 400, { error: "INVALID_CUSTOM_LIST" }) : respondWithStudyLists(200, {
@@ -2959,13 +3073,14 @@ var apiHandler = ({
   const getLesson = () => load((loaded) => loaded.ok ? ((event) => event ? loadExtraContext({ context: loaded.value, extraSessionId: event.extraSessionId }, (lesson) => lesson.ok ? sendJson(response, 200, extraPayload(loaded.value, lesson.value)) : sendJson(response, 404, { error: "LESSON_NOT_FOUND", message: lesson.error })) : sendJson(response, 404, { error: "LESSON_NOT_FOUND" }))(loaded.value.events.findLast(
     (event) => event.type === "extra_session_started" && event.studyDate === loaded.value.session.studyDate && event.session?.lesson && event.session?.dailyPlan
   )) : sendJson(response, 503, { error: "STATE_UNAVAILABLE", message: loaded.error }));
-  const postTodayLesson = () => readJsonBody(request, (bodyResult) => !bodyResult.ok ? sendJson(response, 400, { error: "INVALID_JSON", message: bodyResult.error }) : load((loaded) => loaded.ok ? readJsonFile(join(decksDir, "manifest.json"), (manifestResult) => !manifestResult.ok ? sendJson(response, 503, { error: "DECKS_UNAVAILABLE", message: manifestResult.error }) : usesLegacyDeckDocuments(manifestResult.value) ? startLesson({
+  const postTodayLesson = () => readJsonBody(request, (bodyResult) => !bodyResult.ok ? sendJson(response, 400, { error: "INVALID_JSON", message: bodyResult.error }) : load((loaded) => loaded.ok ? readJsonFile(join(decksDir, "manifest.json"), (manifestResult) => !manifestResult.ok ? sendJson(response, 503, { error: "DECKS_UNAVAILABLE", message: manifestResult.error }) : usesLegacyDeckDocuments(manifestResult.value) || syncedLibrary(manifestResult.value, loaded.value.studyPlan) ? startLesson({
     context: loaded.value,
     catalogFile,
     dailyPlan: bodyResult.value?.more !== true,
     more: bodyResult.value?.more === true,
     eventsFile,
     knownFile: knownItemsFile,
+    knownIds: syncedLibrary(manifestResult.value, loaded.value.studyPlan)?.knownIds,
     now: now(),
     plans: configuredLessonPlans(manifestResult.value, loaded.value.studyPlan, decksDir)
   }, (lesson) => lesson.ok ? (sendJson(
@@ -2989,7 +3104,10 @@ var apiHandler = ({
   const getSyncState = () => readLearnerState({ files: files2 }, (result) => {
     if (!result.ok) return sendJson(response, 503, { error: "STATE_UNAVAILABLE", message: result.error.message });
     const state = portableStudy(result.value);
-    return sendJson(response, 200, { state, revision: syncRevision(state) });
+    return readLocalStudyLibrary(decksDir, knownItemsFile, (library) => library.ok ? sendJson(response, 200, {
+      state: library.value ? { ...state, studyPlan: { ...normalizedStudyPlan(state.studyPlan), library: library.value } } : state,
+      revision: syncRevision(state)
+    }) : sendJson(response, 503, { error: "STUDY_LIBRARY_UNAVAILABLE", message: library.error }));
   });
   const postSyncState = () => readJsonBody(request, (bodyResult) => {
     if (!bodyResult.ok || !bodyResult.value?.state?.settings) {
@@ -3376,7 +3494,7 @@ isMain ? createReviewServer().listen(
 // web/worker.mjs
 var scope = new URL(self.registration.scope);
 var cachePrefix = `leo-sensei:${scope.href}:`;
-var cacheName = cachePrefix + "a7cc65f1bb8be369c03ff355";
+var cacheName = cachePrefix + "41ce8d67ba273b6c9cae674b";
 var assets = define_ASSETS_default.map((path) => new URL(path, scope).href);
 var shell = new URL("index.html", scope);
 var handle = createReviewServer({

@@ -1940,7 +1940,7 @@ dialog::backdrop {
   }
 
   .brand > span:last-child,
-  .statistics-button > span:last-child {
+  .statistics-button:not(.study-lists-button) > span:last-child {
     display: none;
   }
 
@@ -1948,6 +1948,13 @@ dialog::backdrop {
     width: 38px;
     justify-content: center;
     padding: 0;
+  }
+
+  .topbar .study-lists-button {
+    width: auto;
+    min-height: 44px;
+    padding: 0 10px;
+    white-space: nowrap;
   }
 
   .topbar .quiet-button {

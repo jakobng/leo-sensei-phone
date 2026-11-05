@@ -71,10 +71,11 @@ export const createGitHubVault = ({ repository, token, key }, fetcher = globalTh
   const ready = () => request(root).then((repo) => {
     if (repo.private !== true) throw error("Choose a private GitHub repository for sync.");
   });
-  const read = () => ready().then(() => request(file, { missing: true, accept: "application/vnd.github.object+json" }))
+  const read = (previous = null) => ready().then(() => request(file, { missing: true, accept: "application/vnd.github.object+json" }))
     .then((entry) => {
       if (!entry) return null;
       if (!/^[a-f0-9]{40}$/u.test(entry.sha)) throw error("GitHub returned an invalid sync file.");
+      if (entry.sha === previous?.sha && previous.state) return previous;
       const object = entry.encoding === "base64" && entry.content
         ? Promise.resolve(entry) : request(`${root}/git/blobs/${entry.sha}`);
       return Promise.all([imported, object]).then(([cryptoKey, blob]) => {
