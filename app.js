@@ -439,15 +439,7 @@ const compactDate = (value) => String(value ?? "").slice(5).replace("-", "/");
 const activityMarkup = (days) => ((maximum) => `
   <section class="activity-panel" aria-labelledby="activityTitle">
     <div class="detail-heading"><span>Completed reviews</span><h2 id="activityTitle">Study history</h2></div>
-    <div class="activity-navigation">
-      <span data-activity-range></span>
-      <div class="activity-controls" aria-label="Study history navigation">
-        <button type="button" class="quiet-button" data-activity-move="oldest">Oldest</button>
-        <button type="button" class="quiet-button" data-activity-move="earlier" aria-label="Earlier days">←</button>
-        <button type="button" class="quiet-button" data-activity-move="later" aria-label="Later days">→</button>
-        <button type="button" class="quiet-button" data-activity-move="today">Today</button>
-      </div>
-    </div>
+    <div class="activity-range" data-activity-range></div>
     <div class="activity-viewport" tabindex="0" role="region" aria-label="Daily completed reviews. Scroll sideways to see earlier days.">
       <div class="activity-chart">${days.map((entry, index) => `
         <div class="activity-day" title="${escapeHtml(entry.studyDate)} · ${entry.completed.toLocaleString()} completed">
@@ -466,7 +458,6 @@ const bindActivityHistory = () => {
   const firstDay = chart?.firstElementChild;
   if (!firstDay) return;
   const range = root.querySelector("[data-activity-range]");
-  const controls = [...root.querySelectorAll("[data-activity-move]")];
   const rightEdge = () => Math.max(0, viewport.scrollWidth - viewport.clientWidth);
   const dayWidth = () => firstDay.nextElementSibling ? firstDay.nextElementSibling.offsetLeft - firstDay.offsetLeft : firstDay.offsetWidth;
   const dateAt = (index) => chart.children[Math.min(chart.children.length - 1, index)]?.querySelector("time").dateTime;
@@ -477,21 +468,11 @@ const bindActivityHistory = () => {
     const from = dateAt(Math.floor(left / stride));
     const through = dateAt(Math.floor((left + viewport.clientWidth - 1) / stride));
     range.textContent = from === through ? from : `${from} – ${through}`;
-    controls.map((button) => {
-      button.disabled = ["oldest", "earlier"].includes(button.dataset.activityMove) ? left < 1 : activityOffset < 1;
-    });
   };
   const restore = () => {
     viewport.scrollLeft = Math.max(0, rightEdge() - activityOffset);
     update();
   };
-  controls.map((button) => button.addEventListener("click", () => {
-    const direction = button.dataset.activityMove;
-    const page = Math.max(1, Math.floor(viewport.clientWidth / dayWidth())) * dayWidth();
-    if (direction === "oldest" || direction === "today") viewport.scrollLeft = direction === "oldest" ? 0 : rightEdge();
-    else viewport.scrollLeft += direction === "earlier" ? -page : page;
-    update();
-  }));
   viewport.addEventListener("scroll", update, { passive: true });
   restore();
   activityResizeObserver = new ResizeObserver(restore);

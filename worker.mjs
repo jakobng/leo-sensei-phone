@@ -3588,7 +3588,7 @@ isMain ? createReviewServer().listen(
 // web/worker.mjs
 var scope = new URL(self.registration.scope);
 var cachePrefix = `leo-sensei:${scope.href}:`;
-var cacheName = cachePrefix + "de8856b811847a9367a5e372";
+var cacheName = cachePrefix + "070daea530d643a4855e7047";
 var assets = define_ASSETS_default.map((path) => new URL(path, scope).href);
 var shell = new URL("index.html", scope);
 var handle = createReviewServer({

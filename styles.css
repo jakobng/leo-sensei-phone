@@ -3065,26 +3065,11 @@ button.stat-metric:focus-visible {
   border-bottom: 0;
 }
 
-.activity-navigation,
-.activity-controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.activity-navigation {
-  flex-wrap: wrap;
-  justify-content: space-between;
+.activity-range {
   margin-bottom: 10px;
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-}
-
-.activity-controls .quiet-button {
-  min-width: 44px;
-  min-height: 44px;
-  padding: 6px 10px;
 }
 
 .activity-viewport {
