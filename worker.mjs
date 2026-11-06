@@ -1505,6 +1505,14 @@ var oneEditApart = (left, right) => left !== right && Math.abs(left.length - rig
   left.length > right.length ? left : right,
   left.length > right.length ? right : left
 ));
+var kanjiReadingContrasts = /* @__PURE__ */ new Map([["\u8170", "\u8179"], ["\u8179", "\u8170"]]);
+var kanjiContrastHint = (card, reading, index) => {
+  const item = kanjiReadingContrasts.get(text2(card.item));
+  if (!item) return null;
+  const entry = index.data.kanji?.[item];
+  const match = [...entry?.kunReadings ?? [], ...entry?.onReadings ?? []].find((candidate) => normalizeKana(candidate).replaceAll(".", "") === reading);
+  return match ? { item, type: "kanji", reading: match.replaceAll(".", ""), meanings: entry.meanings ?? [] } : null;
+};
 var confusionRank = (card, candidate, index, events) => {
   const left = text2(card.item), right = text2(candidate.item);
   const differences = [...left].filter((ch, position) => ch !== right[position]);
@@ -1522,6 +1530,8 @@ var likelyConfusions = ({ card, feedback, cards, cardStates = {}, events: histor
   const reverse = feedback.correct === false ? text2(feedback.submittedReverse) : "";
   const studied = (candidate) => cardStates[candidate.id]?.known || Number.isInteger(cardStates[candidate.id]?.stage);
   if (feedback.correct !== false || !meaning && !reading && !reverse) return [];
+  const contrast = card.type === "kanji" && reading ? kanjiContrastHint(card, reading, index) : null;
+  if (contrast) return [contrast];
   const events = history.filter(({ type }) => type === "reading_alias_added" || type === "meaning_alias_added");
   return cards.filter((candidate) => candidate.id !== card.id && candidate.item !== card.item && candidate.type === card.type && studied(candidate)).filter((candidate) => meaning && comparableMeanings(acceptedMeanings(candidate, events)).includes(meaning) || reading && acceptedReadings(candidate, events).some((r) => normalizeKana(r).replaceAll(".", "") === reading) || reverse && ([candidate.item, ...candidate.surfaceAliases ?? []].some((surface) => text2(surface) === reverse) || acceptedReadings(candidate, events).some((r) => normalizeKana(r) === normalizeKana(reverse)))).map((candidate) => ({ candidate, rank: confusionRank(card, candidate, index, events) })).filter(({ rank }) => rank !== null && (meaning || reverse || rank < 2 || rank === 3 && card.type === "vocabulary")).toSorted((a, b) => a.rank - b.rank || a.candidate.item.localeCompare(b.candidate.item, "ja")).filter(({ candidate }, position, matches) => matches.findIndex((match) => match.candidate.item === candidate.item) === position).slice(0, 1).map(({ candidate }) => ({
     id: candidate.id,
@@ -3570,7 +3580,7 @@ isMain ? createReviewServer().listen(
 // web/worker.mjs
 var scope = new URL(self.registration.scope);
 var cachePrefix = `leo-sensei:${scope.href}:`;
-var cacheName = cachePrefix + "25d0dbaf9108d678b3c3e126";
+var cacheName = cachePrefix + "c70f129d81c0967f8c14847a";
 var assets = define_ASSETS_default.map((path) => new URL(path, scope).href);
 var shell = new URL("index.html", scope);
 var handle = createReviewServer({
