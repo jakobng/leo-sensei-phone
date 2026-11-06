@@ -520,15 +520,31 @@ var voidedAnswerIds = (events) => new Set(
 );
 var correctionKey = ({ type, occurredAt, eventId }) => JSON.stringify([type, occurredAt, eventId ?? null]);
 var validStudyDay = (value) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/u.test(value) && Number.isFinite(Date.parse(`${value}T00:00:00.000Z`)) && (/* @__PURE__ */ new Date(`${value}T00:00:00.000Z`)).toISOString().slice(0, 10) === value;
-var correctedStudyDays = (events) => ((corrections) => eventsArray(events).filter((event) => event?.type !== "study_day_corrected").map((event) => ((correction) => correction ? {
-  ...event,
-  studyDate: correction.studyDate,
-  ...event.type === "session_started" && correction.session ? { session: { ...correction.session, studyDate: correction.studyDate } } : {},
-  ...event.type === "bypass_started" && validStudyDay(correction.makeupStudyDate) ? { makeupStudyDate: correction.makeupStudyDate } : {}
-} : event)(corrections.get(correctionKey(event)))))(new Map(eventsArray(events).filter((event) => event?.type === "study_day_corrected" && event.version === 1).flatMap((event) => Array.isArray(event.corrections) ? event.corrections : []).filter((correction) => typeof correction?.target?.type === "string" && typeof correction.target.occurredAt === "string" && validStudyDay(correction.studyDate) && (!correction.session || correction.target.type === "session_started" && Array.isArray(correction.session.scheduled) && Array.isArray(correction.session.reactivations))).map((correction) => [correctionKey(correction.target), correction])));
-var effectiveReviewEvents = (events) => ((corrected) => ((voidedIds) => corrected.filter(
-  (event) => event?.type !== "review_answer_voided" && (!isReviewAnswerEvent(event) || !voidedIds.has(event?.eventId))
-))(voidedAnswerIds(corrected)))(correctedStudyDays(events));
+var correctedStudyDays = (events) => {
+  const history = eventsArray(events);
+  const corrections = history.filter((event) => event?.type === "study_day_corrected" && event.version === 1).flatMap((event) => Array.isArray(event.corrections) ? event.corrections : []).filter((correction) => typeof correction?.target?.type === "string" && typeof correction.target.occurredAt === "string" && validStudyDay(correction.studyDate) && (!correction.session || correction.target.type === "session_started" && Array.isArray(correction.session.scheduled) && Array.isArray(correction.session.reactivations)));
+  const times = new Set(corrections.map(({ target }) => target.occurredAt));
+  const byTarget = new Map(corrections.map((correction) => [correctionKey(correction.target), correction]));
+  return history.filter((event) => event?.type !== "study_day_corrected").map((event) => {
+    const correction = times.has(event?.occurredAt) ? byTarget.get(correctionKey(event)) : void 0;
+    if (!correction) return event;
+    return {
+      ...event,
+      studyDate: correction.studyDate,
+      ...event.type === "session_started" && correction.session ? { session: { ...correction.session, studyDate: correction.studyDate } } : {},
+      ...event.type === "bypass_started" && validStudyDay(correction.makeupStudyDate) ? { makeupStudyDate: correction.makeupStudyDate } : {}
+    };
+  });
+};
+var reviewProjections = /* @__PURE__ */ new WeakSet();
+var effectiveReviewEvents = (events) => {
+  if (reviewProjections.has(events)) return events;
+  const corrected = correctedStudyDays(events);
+  const voidedIds = voidedAnswerIds(corrected);
+  const projected = corrected.filter((event) => event?.type !== "review_answer_voided" && (!voidedIds.size || !isReviewAnswerEvent(event) || !voidedIds.has(event?.eventId)));
+  reviewProjections.add(projected);
+  return projected;
+};
 var effectiveLearningEvents = (events) => effectiveReviewEvents(events).filter(
   (event) => !isReviewAnswerEvent(event) || isLearningAnswerEvent(event)
 );
@@ -622,6 +638,23 @@ var foldCardEvents = (cardState, events, cardsById) => events.toSorted(
   (state, event) => applicableBaseline(event, cardsById) ? applyBaseline(state, event) : applicableAnswer(event, cardsById) ? scheduleReview(state, event) : applicableKnownChange(event, cardsById) ? { ...state, known: event.type === "card_marked_known" } : state,
   cardState
 );
+var createCardStateProjector = () => {
+  let previous;
+  return (catalog, effectiveEvents) => {
+    if (previous?.catalog === catalog && previous.events === effectiveEvents) return previous.projection;
+    const initial = previous?.catalog === catalog ? previous.initial : Object.fromEntries(catalog.cards.map(({ id }) => [id, initialCardState(id)]));
+    const grouped = Object.groupBy(effectiveEvents.filter((event) => typeof event?.cardId === "string" && (event.type === "marumori_baseline" || event.type === "card_marked_known" || event.type === "card_known_restored" || isSchedulingAnswerEvent(event))), ({ cardId }) => cardId);
+    const canReuse = previous?.catalog === catalog;
+    const cardsById = Object.fromEntries(Object.entries(initial).map(([id, state]) => {
+      const events = grouped[id] ?? [];
+      const old = canReuse ? previous.grouped[id] ?? [] : [];
+      return [id, canReuse && events.length === old.length && events.every((event, index) => event === old[index]) ? previous.projection.cardsById[id] : foldCardEvents(state, events, initial)];
+    }));
+    const projection = { cardsById };
+    previous = { catalog, events: effectiveEvents, initial, grouped, projection };
+    return projection;
+  };
+};
 var foldLearningEvents = (catalog, events) => {
   const cards = Array.isArray(catalog?.cards) ? catalog.cards : [];
   const sourceEvents = effectiveSchedulingEvents(events);
@@ -1917,14 +1950,27 @@ var readCatalog = (path, callback) => readFile(path, "utf8", (readError, text3) 
 var readSettings = (path, callback) => path ? readFile(path, "utf8", (readError, text3) => readError?.code === "ENOENT" ? callback({ ok: true, value: defaultLearnerSettings() }) : readError ? callback(error2(readError.message)) : parseStoredJson(path, text3, (result) => ((normalized) => callback(
   result.ok && normalized.ok ? normalized : error2(result.ok ? normalized.error.issues.map(({ message }) => message).join(" ") : result.error)
 ))(result.ok ? normalizeLearnerSettings(result.value) : result))) : callback({ ok: true, value: defaultLearnerSettings() });
-var dailyContext = ({ catalog, events, kanjiLexicon = {}, now, settings, studyPlan, timeZone }) => {
-  const enrichedCatalog = enrichKanjiReference(catalog, kanjiLexicon);
-  const effectiveEvents = effectiveReviewEvents(events);
-  const folded = foldLearningEvents(enrichedCatalog, effectiveEvents);
+var projectStudy = (catalog, events, lexicon) => {
+  const enriched = enrichKanjiReference(catalog, lexicon);
+  const effective = effectiveReviewEvents(events);
+  return { enriched, effective, folded: foldLearningEvents(enriched, effective) };
+};
+var createStudyProjector = () => {
+  const projectCards = createCardStateProjector();
+  let previous;
+  return (catalog, events, lexicon) => {
+    const enriched = previous?.catalog === catalog && previous.lexicon === lexicon ? previous.enriched : enrichKanjiReference(catalog, lexicon);
+    const effective = previous?.events === events ? previous.effective : effectiveReviewEvents(events);
+    previous = { catalog, events, lexicon, enriched, effective };
+    return { enriched, effective, folded: projectCards(enriched, effective) };
+  };
+};
+var dailyContext = ({ catalog, events, kanjiLexicon = {}, now, settings, studyPlan, timeZone, project }) => {
+  const { enriched, effective, folded } = project(catalog, events, kanjiLexicon);
   const view = buildDailyView({
-    cards: enrichedCatalog.cards,
+    cards: enriched.cards,
     cardStates: folded,
-    events: effectiveEvents,
+    events: effective,
     now,
     requiredDailyCount: settings.requiredDailyCount,
     timeZone
@@ -1932,19 +1978,19 @@ var dailyContext = ({ catalog, events, kanjiLexicon = {}, now, settings, studyPl
   return view.ok ? {
     ok: true,
     value: {
-      catalog: enrichedCatalog,
+      catalog: enriched,
       settings,
       studyPlan,
       kanjiLexicon,
-      events: effectiveEvents,
+      events: effective,
       cardStates: folded,
       ...view.value,
       access: gateAccess(view.value.status)
     }
   } : error2(view.error);
 };
-var loadDailyContext = ({ catalogFile, eventsFile, kanjiLexicon, settingsFile, studyPlan, now = (/* @__PURE__ */ new Date()).toISOString(), timeZone }, callback) => readCatalog(catalogFile, (catalogResult) => catalogResult.ok ? readSettings(settingsFile, (settingsResult) => settingsResult.ok ? readJsonLines(eventsFile, (eventsResult) => callback(
-  eventsResult.ok ? dailyContext({ catalog: catalogResult.value, events: eventsResult.value, kanjiLexicon, now, settings: settingsResult.value, studyPlan, timeZone }) : error2(eventsResult.error.message)
+var loadDailyContext = ({ catalogFile, eventsFile, kanjiLexicon, settingsFile, studyPlan, now = (/* @__PURE__ */ new Date()).toISOString(), timeZone, project = projectStudy }, callback) => readCatalog(catalogFile, (catalogResult) => catalogResult.ok ? readSettings(settingsFile, (settingsResult) => settingsResult.ok ? readJsonLines(eventsFile, (eventsResult) => callback(
+  eventsResult.ok ? dailyContext({ catalog: catalogResult.value, events: eventsResult.value, kanjiLexicon, now, settings: settingsResult.value, studyPlan, timeZone, project }) : error2(eventsResult.error.message)
 )) : callback(settingsResult)) : callback(catalogResult));
 var loadReadingContext = ({ catalogFile, eventsFile, kanjiLexicon, cardId }, callback) => readCatalog(catalogFile, (catalog) => !catalog.ok ? callback(catalog) : readJsonLines(eventsFile, (events) => callback(events.ok ? {
   ok: true,
@@ -2583,6 +2629,7 @@ var contentTypes = Object.freeze({
   ".svg": "image/svg+xml; charset=utf-8"
 });
 var emptyStudyPlan = Object.freeze({ version: 2, dailyLimits: {}, customLists: [], customAdditions: {} });
+var emptyLexicon = Object.freeze({});
 var createSerialQueue = () => /* @__PURE__ */ ((operations) => {
   const runNext = () => operations[0]?.(() => (operations.shift(), runNext()));
   return (operation) => (operations.push(operation), operations.length === 1 ? runNext() : null);
@@ -2714,8 +2761,8 @@ var readOptionalJsonFile = (path, fallback, callback) => readFile(path, "utf8", 
 var readStudyPlan = (path, callback) => readOptionalJsonFile(path, emptyStudyPlan, (result) => callback(
   result.ok ? { ok: true, value: normalizedStudyPlan(result.value) } : result
 ));
-var readKanjiLexicon = (path, callback) => readOptionalJsonFile(path, {}, (result) => callback(
-  result.ok ? { ok: true, value: result.value?.entries ?? result.value ?? {} } : result
+var readKanjiLexicon = (path, callback) => readOptionalJsonFile(path, null, (result) => callback(
+  result.ok ? { ok: true, value: result.value?.entries ?? result.value ?? emptyLexicon } : result
 ));
 var publicDeckManifest = (manifest) => ({
   version: manifest.version,
@@ -2904,12 +2951,14 @@ var apiHandler = ({
   catalogFile,
   customListsFile,
   decksDir,
+  deferReviewNotes,
   eventsFile,
   grammarFile,
   grammarNewLimit,
   kanjiLexiconFile,
   referenceFile,
   referenceIndex,
+  project,
   recentReviewReferences,
   knownItemsFile,
   settingsFile,
@@ -2932,26 +2981,27 @@ var apiHandler = ({
   const reference = () => referenceIndex ? Promise.resolve(referenceIndex) : readStudyReference(referenceFile);
   const studiedItems = (context) => new Set(context.catalog.cards.filter((card) => context.cardStates.cardsById?.[card.id]?.known || Number.isInteger(context.cardStates.cardsById?.[card.id]?.stage)).map((card) => card.item));
   const referenceContext = (context) => ({ kanjiLexicon: context.kanjiLexicon, studied: studiedItems(context) });
+  const confusionsFor = (card, feedback, context, index) => likelyConfusions({
+    card,
+    feedback,
+    cards: context.catalog.cards,
+    cardStates: context.cardStates.cardsById,
+    events: context.events,
+    index
+  });
   const sendFeedback = (recorded, updated, cardId, daily) => {
     const feedback = feedbackPayload(recorded, updated, cardId);
     const card = updated.catalog.cards.find(({ id }) => id === cardId);
     if (card && feedback.answerEventId && !feedback.retry) {
-      recentReviewReferences.set(feedback.answerEventId, { card, ...referenceContext(updated) });
+      recentReviewReferences.set(feedback.answerEventId, { card, feedback, context: updated });
       if (recentReviewReferences.size > 4) recentReviewReferences.delete(recentReviewReferences.keys().next().value);
     }
     const send = (index) => sendJson(response, 200, {
       ...feedback,
       daily,
-      confusions: feedback.retry ? [] : likelyConfusions({
-        card,
-        feedback,
-        cards: updated.catalog.cards,
-        cardStates: updated.cardStates.cardsById,
-        events: updated.events,
-        index
-      })
+      confusions: feedback.retry ? [] : confusionsFor(card, feedback, updated, index)
     });
-    return feedback.correct === false ? reference().then(send).catch(() => send(createReferenceIndex())) : sendJson(response, 200, { ...feedback, daily, confusions: [] });
+    return feedback.correct === false && !feedback.retry && !deferReviewNotes ? reference().then(send).catch(() => send(createReferenceIndex())) : sendJson(response, 200, { ...feedback, daily, confusions: [] });
   };
   const load = (callback) => readStudyPlan(studyPlanFile, (planResult) => planResult.ok ? readKanjiLexicon(kanjiLexiconFile, (lexiconResult) => lexiconResult.ok ? loadDailyContext({
     catalogFile,
@@ -2960,7 +3010,8 @@ var apiHandler = ({
     settingsFile,
     studyPlan: planResult.value,
     now: now(),
-    timeZone
+    timeZone,
+    project
   }, callback) : callback(lexiconResult)) : callback(planResult));
   const prewarmSpeechQueue = (context) => speech.available ? queuedSpeechTexts(context).reduce(
     (ready, text3) => ready.then(() => new Promise((resolve) => speech.request(text3, resolve))),
@@ -2985,18 +3036,23 @@ var apiHandler = ({
   const getProgressItems = (type, bandId) => load((loaded) => ((result) => !loaded.ok ? sendJson(response, 503, { error: "STATE_UNAVAILABLE", message: loaded.error }) : result.ok ? sendJson(response, 200, result.value) : sendJson(response, 404, { error: "PROGRESS_CATEGORY_NOT_FOUND", message: result.error }))(
     loaded.ok ? progressItems(loaded.value, type, bandId) : loaded
   ));
-  const sendReference = (card, { kanjiLexicon, studied }) => (referenceIndex ? reference() : readReferenceForCard(referenceFile, card)).then((index) => sendJson(response, 200, studyReference({
+  const sendReference = (card, { kanjiLexicon, studied }, decorate = (detail) => detail) => (referenceIndex ? reference() : readReferenceForCard(referenceFile, card)).then((index) => sendJson(response, 200, decorate(studyReference({
     card,
     index,
     lexicon: kanjiLexicon,
     studied
-  }))).catch(() => sendJson(response, 503, { error: "REFERENCE_UNAVAILABLE", message: "The study reference could not be loaded. Close this panel and try again." }));
+  }), index))).catch(() => sendJson(response, 503, { error: "REFERENCE_UNAVAILABLE", message: "The study reference could not be loaded. Close this panel and try again." }));
   const getKanji = () => ((literal) => !/^[\p{Script=Han}⺀-⻳]$/u.test(literal) ? sendJson(response, 400, { error: "INVALID_KANJI" }) : load((result) => !result.ok ? sendJson(response, 503, { error: "STATE_UNAVAILABLE", message: result.error }) : sendReference({ item: literal, type: "kanji" }, referenceContext(result.value))))(String(url.searchParams.get("literal") ?? ""));
-  const sendCardReference = (card, context) => !card ? sendJson(response, 404, { error: "CARD_NOT_FOUND" }) : !card.item || [...card.item].length > 128 || !["kanji", "vocabulary"].includes(card.type) ? sendJson(response, 400, { error: "INVALID_REFERENCE_ITEM" }) : sendReference(card, context);
+  const sendCardReference = (card, context, decorate) => !card ? sendJson(response, 404, { error: "CARD_NOT_FOUND" }) : !card.item || [...card.item].length > 128 || !["kanji", "vocabulary"].includes(card.type) ? sendJson(response, 400, { error: "INVALID_REFERENCE_ITEM" }) : sendReference(card, context, decorate);
+  const sendAnswerReference = (card, context, feedback) => sendCardReference(card, referenceContext(context), (detail, index) => ({
+    ...detail,
+    confusions: feedback.correct ? [] : confusionsFor(card, feedback, context, index)
+  }));
   const getReference = () => {
     const id = url.searchParams.get("id");
-    const recent = recentReviewReferences.get(url.searchParams.get("answer"));
-    if (recent && recent.card.id === id) return sendCardReference(recent.card, recent);
+    const answer = url.searchParams.get("answer");
+    const recent = recentReviewReferences.get(answer);
+    if (recent && recent.card.id === id) return sendCardReference(recent.card, referenceContext(recent.context));
     return load((result) => {
       if (!result.ok) return sendJson(response, 503, { error: "STATE_UNAVAILABLE", message: result.error });
       const card = id ? result.value.catalog.cards.find((candidate) => candidate.id === id) : {
@@ -3004,8 +3060,23 @@ var apiHandler = ({
         type: url.searchParams.get("type") ?? "vocabulary",
         reading: String(url.searchParams.get("reading") ?? "").trim()
       };
+      const event = deferReviewNotes && card && answer && result.value.events.findLast((candidate) => candidate.eventId === answer && candidate.cardId === id && isReviewAnswerEvent(candidate));
+      if (event) return sendAnswerReference(card, result.value, {
+        correct: event.correct,
+        readingCorrect: event.readingCorrect,
+        meaningCorrect: event.meaningCorrect,
+        submittedReading: event.answers?.reading,
+        submittedMeaning: event.answers?.meaning,
+        submittedReverse: event.answers?.reverse
+      });
       return sendCardReference(card, referenceContext(result.value));
     });
+  };
+  const getReviewNotes = () => {
+    const recent = recentReviewReferences.get(url.searchParams.get("answer"));
+    if (!recent || recent.card.id !== url.searchParams.get("id")) return sendJson(response, 404, { error: "ANSWER_NOT_CACHED" });
+    const { card, context, feedback } = recent;
+    return sendAnswerReference(card, context, feedback);
   };
   const persistStudyPlan = (plan, callback) => readLearnerState({ files: files2 }, (stateResult) => stateResult.ok ? writeLearnerState({ files: files2, state: { ...stateResult.value, studyPlan: normalizedStudyPlan(plan) } }, callback) : callback(stateResult));
   const respondWithStudyLists = (status, plan, callback = () => void 0) => persistStudyPlan(plan, (written) => written.ok ? load((loaded) => loaded.ok ? readJsonFile(join(decksDir, "manifest.json"), (manifestResult) => manifestResult.ok ? (sendJson(response, status, publicStudyLists(loaded.value, manifestResult.value, normalizedStudyPlan(plan))), callback()) : sendJson(response, 503, { error: "DECKS_UNAVAILABLE", message: manifestResult.error })) : sendJson(response, 503, { error: "STATE_UNAVAILABLE", message: loaded.error })) : sendJson(response, 500, { error: "STUDY_PLAN_WRITE_FAILED", message: written.error?.message ?? written.error }));
@@ -3377,6 +3448,7 @@ var apiHandler = ({
     "GET /api/grammar/review": getGrammarReview,
     "GET /api/kanji": getKanji,
     "GET /api/reference": getReference,
+    "GET /api/review/notes": getReviewNotes,
     "GET /api/lesson": getLesson,
     "GET /api/settings": getSettings,
     "GET /api/speech": getSpeech,
@@ -3446,12 +3518,14 @@ var createReviewServer = (options = {}) => {
     catalogFile,
     customListsFile,
     decksDir,
+    deferReviewNotes: options.deferReviewNotes === true,
     eventsFile,
     grammarFile,
     grammarNewLimit,
     kanjiLexiconFile,
     referenceFile,
     referenceIndex: options.referenceData ? createReferenceIndex(options.referenceData) : null,
+    project: createStudyProjector(),
     recentReviewReferences: /* @__PURE__ */ new Map(),
     knownItemsFile,
     settingsFile,
@@ -3496,36 +3570,38 @@ isMain ? createReviewServer().listen(
 // web/worker.mjs
 var scope = new URL(self.registration.scope);
 var cachePrefix = `leo-sensei:${scope.href}:`;
-var cacheName = cachePrefix + "e84790632d6f98151140da7f";
+var cacheName = cachePrefix + "25d0dbaf9108d678b3c3e126";
 var assets = define_ASSETS_default.map((path) => new URL(path, scope).href);
 var shell = new URL("index.html", scope);
 var handle = createReviewServer({
   stateDirectory: "/learner",
   decksDir: "/decks",
   referenceFile: "/decks/study-reference.json.gz",
+  deferReviewNotes: true,
   mode: "off",
   ttsEndpoint: ""
 });
 var jsonError = (status, error3, message) => Response.json({ error: error3, message }, { status });
+var dispatch = (request, route) => new Promise((resolve, reject) => {
+  let status;
+  let headers;
+  const result = handle({
+    url: route,
+    method: request.method,
+    headers: { ...Object.fromEntries(request.headers), host: "127.0.0.1" },
+    body: request
+  }, {
+    writeHead: (code, responseHeaders) => {
+      status = code;
+      headers = responseHeaders;
+    },
+    end: (body) => resolve(new Response(body, { status, headers }))
+  });
+  Promise.resolve(result).catch(reject);
+});
 var requests = Promise.resolve();
 var reviewRequest = (request, route) => {
-  const run = requests.then(() => beginFiles()).then(() => new Promise((resolve, reject) => {
-    let status;
-    let headers;
-    const result = handle({
-      url: route,
-      method: request.method,
-      headers: { ...Object.fromEntries(request.headers), host: "127.0.0.1" },
-      body: request
-    }, {
-      writeHead: (code, responseHeaders) => {
-        status = code;
-        headers = responseHeaders;
-      },
-      end: (body) => resolve(new Response(body, { status, headers }))
-    });
-    Promise.resolve(result).catch(reject);
-  })).then(
+  const run = requests.then(() => beginFiles()).then(() => dispatch(request, route)).then(
     (response) => finishFiles(response.ok).then(() => response),
     (error3) => finishFiles(false).then(() => {
       throw error3;
@@ -3549,7 +3625,7 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== scope.origin || !url.pathname.startsWith(scope.pathname)) return;
   const route = url.pathname.slice(scope.pathname.length);
   if (route.startsWith("api/")) {
-    event.respondWith(event.request.mode === "navigate" || !event.clientId ? jsonError(403, "APP_REQUIRED", "Open Leo Sensei to use study data.") : reviewRequest(event.request, `/${route}${url.search}`));
+    event.respondWith(event.request.mode === "navigate" || !event.clientId ? jsonError(403, "APP_REQUIRED", "Open Leo Sensei to use study data.") : route === "api/review/notes" && event.request.method === "GET" ? dispatch(event.request, `/${route}${url.search}`).catch(() => jsonError(503, "REFERENCE_UNAVAILABLE", "Study notes could not load.")) : reviewRequest(event.request, `/${route}${url.search}`));
   } else if (event.request.mode === "navigate" && (route === "" || route === "index.html")) {
     event.respondWith(caches.open(cacheName).then((cache) => cache.match(shell)));
   } else if (assets.includes(url.href)) {

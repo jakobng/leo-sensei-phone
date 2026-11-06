@@ -47,33 +47,37 @@ const syncError = (result) => Object.assign(new Error(result.error), { code: res
 const validState = (state) => state?.version === 2 && Array.isArray(state.events)
   && Array.isArray(state.catalog?.cards) && Array.isArray(state.customLists) && state.settings;
 
-export const syncStudyOnce = ({ config, readLocal, applyLocal, canApply, vault = createGitHubVault(config) }, retries = 2) =>
-  Promise.all([readLocal(), vault.read({ sha: config.remoteSha, state: config.base })]).then(([local, remote]) => {
-    if (!local.ok) throw syncError(local);
-    if (remote && !validState(remote.state)) throw new Error("The cloud copy is incomplete.");
-    const remoteStudy = remote && portableStudy(remote.state);
-    const merged = mergeStudy(config.base, local.value.state, remoteStudy);
-    const changedLocal = !studyContains(local.value.state, merged);
-    const changedRemote = !remoteStudy || !studyContains(remoteStudy, merged);
-    if (changedLocal && !canApply()) return { deferred: true };
-    const push = changedRemote ? vault.write(merged, remote?.sha) : Promise.resolve();
-    return push.then((written) => {
-      const remoteSha = changedRemote ? written?.content?.sha : remote?.sha;
-      if (!changedLocal) return { base: merged, changedLocal, remoteSha };
-      if (!canApply()) return { deferred: true };
-      return applyLocal({ revision: local.value.revision, state: merged }).then((applied) => {
-        if (!applied.ok) throw syncError(applied);
-        return { base: merged, changedLocal, remoteSha };
+export const syncStudyOnce = ({ config, readLocal, applyLocal, canApply, canStart = () => true, vault = createGitHubVault(config) }, retries = 2) =>
+  vault.read({ sha: config.remoteSha, state: config.base })
+    .then((remote) => canStart() ? readLocal().then((local) => ({ local, remote })) : null)
+    .then((snapshot) => {
+      if (!snapshot || !canStart()) return { deferred: true };
+      const { local, remote } = snapshot;
+      if (!local.ok) throw syncError(local);
+      if (remote && !validState(remote.state)) throw new Error("The cloud copy is incomplete.");
+      const remoteStudy = remote && portableStudy(remote.state);
+      const merged = mergeStudy(config.base, local.value.state, remoteStudy);
+      const changedLocal = !studyContains(local.value.state, merged);
+      const changedRemote = !remoteStudy || !studyContains(remoteStudy, merged);
+      if (changedLocal && !canApply()) return { deferred: true };
+      const push = changedRemote ? vault.write(merged, remote?.sha) : Promise.resolve();
+      return push.then((written) => {
+        const remoteSha = changedRemote ? written?.content?.sha : remote?.sha;
+        if (!changedLocal) return { base: merged, changedLocal, remoteSha };
+        if (!canApply()) return { deferred: true };
+        return applyLocal({ revision: local.value.revision, state: merged }).then((applied) => {
+          if (!applied.ok) throw syncError(applied);
+          return { base: merged, changedLocal, remoteSha };
+        });
       });
+    }).catch((error) => {
+      if (error.code === "SYNC_RETRY" && retries > 0 && canStart()) {
+        return syncStudyOnce({ config, readLocal, applyLocal, canApply, canStart, vault }, retries - 1);
+      }
+      throw error;
     });
-  }).catch((error) => {
-    if (error.code === "SYNC_RETRY" && retries > 0) {
-      return syncStudyOnce({ config, readLocal, applyLocal, canApply, vault }, retries - 1);
-    }
-    throw error;
-  });
 
-export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onApplied }) => {
+export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onApplied, idleDelay = 0 }) => {
   const name = `leo-sensei-sync:${scope}`;
   const supported = Boolean(globalThis.indexedDB && globalThis.crypto?.subtle && navigator.locks
     && globalThis.CompressionStream && globalThis.DecompressionStream);
@@ -83,6 +87,7 @@ export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onAppl
   let timer;
   let configured = false;
   let status = "Sync is off.";
+  const canStart = () => canApply() || (idleDelay > 0 && document.hidden);
   const display = () => {
     if (!currentPanel?.isConnected) return;
     const connect = currentPanel.querySelector("[data-sync-connect]");
@@ -93,7 +98,7 @@ export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onAppl
     [...currentPanel.querySelectorAll("button")].map((button) => { button.disabled = Boolean(running); });
   };
   const sync = (newConfig) => {
-    if (!supported || running || (!newConfig && !configured)) return;
+    if (!supported || running || (newConfig ? !canApply() : !configured || !canStart())) return;
     if (navigator.onLine === false) {
       status = "Sync is offline. Your progress is saved here.";
       display();
@@ -103,12 +108,16 @@ export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onAppl
     running = navigator.locks.request(name, () => (
       newConfig ? Promise.resolve(newConfig) : store.read()
     ).then((config) => {
+      if (newConfig ? !canApply() : !canStart()) {
+        status = "Sync will resume when you return to Today or Settings.";
+        return;
+      }
       if (!config) {
         configured = false;
         status = "Sync is off.";
         return;
       }
-      return syncStudyOnce({ config, readLocal, applyLocal, canApply }).then((result) => {
+      return syncStudyOnce({ config, readLocal, applyLocal, canApply, canStart }).then((result) => {
         if (result.deferred) {
           status = "Sync will resume when you return to Today or Settings.";
           return;
@@ -132,8 +141,8 @@ export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onAppl
     display();
   };
   const schedule = (delay = 12000) => {
-    if (!configured || !supported) return;
     clearTimeout(timer);
+    if (!configured || !supported || !canStart()) return;
     timer = setTimeout(() => sync(), delay);
   };
   const attach = (panel) => {
@@ -174,14 +183,14 @@ export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onAppl
     configured = Boolean(config);
     if (config) status = "Sync is connected.";
     display();
-    schedule(0);
+    schedule(idleDelay);
   }).catch(() => {
     status = "Could not open this browser’s sync settings.";
     display();
   });
-  globalThis.addEventListener("online", () => schedule(0));
+  globalThis.addEventListener("online", () => schedule(idleDelay));
   document.addEventListener("visibilitychange", () => {
-    schedule(0);
+    schedule(document.hidden ? 0 : idleDelay);
   });
   setInterval(() => { if (!document.hidden && canApply()) sync(); }, 90000);
   return { attach, schedule };

@@ -23,6 +23,7 @@ const heardLessonCardIds = new Set();
 // Read-only display cache; learner progress remains in the server event stream.
 const feedbackReferences = new Map();
 const pendingFeedbackReferences = new Map();
+const answerConfusions = new Map();
 
 const escapeHtml = (value) =>
   String(value ?? "")
@@ -80,11 +81,13 @@ const fetchValue = (url, options) => new Promise((resolve) => fetchJson(url, opt
 
 let syncView;
 let allowSyncApply = false;
+const homeSyncDelay = browserBuild ? 3000 : 0;
 const studySync = syncEnabled ? createStudySync({
   scope: new URL(".", import.meta.url).href,
   readLocal: () => fetchValue("/api/sync/state"),
   applyLocal: (data) => fetchValue("/api/sync/state", jsonMutationOptions("POST", data)),
   canApply: () => allowSyncApply,
+  idleDelay: homeSyncDelay,
   onApplied: () => allowSyncApply
     ? bootstrap("Study progress synced.", ["settings", "lists"].includes(syncView) ? syncView : null)
     : null,
@@ -239,17 +242,18 @@ const feedbackMarkup = (state, reference = null, comparisonOpen = []) => {
     ? aliasButton("meaning", feedback.submittedMeaning, feedback.aliasSaved, state.aliasSaving)
     : "";
   const resultClass = feedback.correct ? "correct" : "wrong";
+  const confusions = answerConfusions.get(feedback.answerEventId) ?? feedback.confusions;
   return `
     <div class="feedback-page"><section class="feedback-stage ${resultClass} kind-${escapeHtml(feedback.cardType)}">
       ${readOnly ? '<p class="previous-answer-label">Previous answer <span>· Read only</span></p>' : previousAnswerMarkup(state)}
-      <div class="feedback-heading${feedback.confusions?.length ? " has-confusion" : ""}">
+      <div class="feedback-heading${confusions?.length ? " has-confusion" : ""}">
         <span class="feedback-symbol" aria-hidden="true">${feedback.correct ? "✓" : "×"}</span>
         <div class="feedback-answer">
           <button class="feedback-word" type="button" lang="ja" title="Open explanation" data-reference-id="${escapeHtml(cardId)}" data-reference-type="${escapeHtml(feedback.cardType)}" data-reference-item="${escapeHtml(feedback.expectedSurface)}">${escapeHtml(feedback.expectedSurface)}</button>
           ${feedback.expectedReading ? `<p class="feedback-reading" lang="ja">${escapeHtml(feedback.expectedReading)}</p>` : ""}
           <ul class="feedback-meanings" aria-label="Correct meanings">${feedback.expectedMeanings.map((meaning) => `<li>${escapeHtml(meaning)}</li>`).join("")}</ul>
         </div>
-        <div class="feedback-context">${Number.isInteger(feedback.level) ? `<span class="feedback-level">Level ${feedback.level}</span>` : ""}${confusionMarkup(feedback.confusions)}</div>
+        <div class="feedback-context">${Number.isInteger(feedback.level) ? `<span class="feedback-level">Level ${feedback.level}</span>` : ""}${confusionMarkup(confusions)}</div>
       </div>
       <div class="feedback-submitted">
         <span class="feedback-submitted-label">You entered</span>
@@ -713,7 +717,25 @@ const persistSettings = ({ state, form, nextView }) => ((settingsResult) => sett
     ))
   : render({ ...state, submitting: false, error: settingsResult.error.join(" ") }))(settingsFromForm(form));
 
-const openView = (state, view) => view === "review"
+let statsTimer;
+const cancelHomeStats = () => {
+  clearTimeout(statsTimer);
+  statsTimer = undefined;
+};
+const scheduleHomeStats = (state) => {
+  const home = root.querySelector(".home-main");
+  const timer = setTimeout(() => {
+    if (root.querySelector(".home-main") !== home || state.submitting) return;
+    fetchValue("/api/stats").then((stats) => stats.ok && statsTimer === timer && root.querySelector(".home-main") === home
+      ? render({ ...state, stats: stats.value }) : null);
+  }, browserBuild ? 1400 : 0);
+  statsTimer = timer;
+};
+
+const openView = (state, view) => {
+  cancelHomeStats();
+  if (view === "review") allowSyncApply = false;
+  return view === "review"
     ? fetchValue("/api/daily").then((daily) => daily.ok
       ? render({ ...stateWithDaily(state, daily.value), view: "review", error: null, notice: null })
       : render({ ...state, error: daily.error }))
@@ -731,13 +753,11 @@ const openView = (state, view) => view === "review"
           })
         : render({ ...state, error: lists.error }))
   : view === "home"
-    ? ((statsRequest) => Promise.all([fetchValue("/api/daily"), fetchValue("/api/study-lists")])
+    ? Promise.all([fetchValue("/api/daily"), fetchValue("/api/study-lists")])
       .then(([daily, lists]) => daily.ok && lists.ok
         ? ((homeState) => (
             render(homeState),
-            ((homeNode) => statsRequest.then((stats) => stats.ok && root.querySelector(".home-main") === homeNode
-              ? render({ ...homeState, stats: stats.value, error: null })
-              : null))(root.querySelector(".home-main"))
+            scheduleHomeStats(homeState)
           ))({
             ...stateWithDaily(state, daily.value),
             view,
@@ -746,8 +766,9 @@ const openView = (state, view) => view === "review"
             error: null,
             notice: null,
           })
-        : render({ ...state, error: [daily, lists].find((result) => !result.ok)?.error })))(fetchValue("/api/stats"))
+        : render({ ...state, error: [daily, lists].find((result) => !result.ok)?.error }))
     : render({ ...state, view, error: null, notice: null });
+};
 
 const downloadBackup = (state) => fetchJson("/api/backup", undefined, (result) => result.ok
   ? ((url) => ((link) => (
@@ -794,32 +815,55 @@ const bindReferenceLinks = (container, state) => [...container.querySelectorAll(
         : { type: "reference_failed", requestKey: query, error: result.error })));
   }));
 
-const feedbackReferenceRequest = (cardId, answerEventId) => pendingFeedbackReferences.get(cardId) ?? ((pending) => (
-  pendingFeedbackReferences.set(cardId, pending), pending
-))(new Promise((resolve) => fetchJson(`/api/reference?${new URLSearchParams({ id: cardId, ...(answerEventId ? { answer: answerEventId } : {}) })}`, undefined, resolve))
-  .then((result) => {
-    pendingFeedbackReferences.delete(cardId);
+const feedbackReferenceRequest = (cardId, answerEventId) => {
+  const browserNotes = browserBuild && answerEventId;
+  const key = browserNotes ? answerEventId : cardId;
+  const query = new URLSearchParams({ id: cardId, ...(answerEventId ? { answer: answerEventId } : {}) });
+  const cached = pendingFeedbackReferences.get(key);
+  if (cached) return cached;
+  const pending = (browserNotes ? fetchValue(`/api/review/notes?${query}`).then((result) => result.code === "ANSWER_NOT_CACHED"
+    ? fetchValue(`/api/reference?${query}`) : result) : fetchValue(`/api/reference?${query}`)).then((result) => {
+    pendingFeedbackReferences.delete(key);
     if (result.ok) {
       feedbackReferences.set(cardId, result.value);
       feedbackReferences.size > 4 ? feedbackReferences.delete(feedbackReferences.keys().next().value) : null;
+      if (browserNotes) {
+        answerConfusions.set(answerEventId, result.value.confusions ?? []);
+        if (answerConfusions.size > 4) answerConfusions.delete(answerConfusions.keys().next().value);
+      }
     }
     return result;
-  }));
+  });
+  pendingFeedbackReferences.set(key, pending);
+  return pending;
+};
 
 const loadFeedbackReference = (target, state) => {
   const { cardId, feedback } = displayedAnswer(state);
-  target.innerHTML = '<p class="inline-reference-loading" role="status">Loading study notes…</p>';
+  const alreadyLoaded = feedbackReferences.has(cardId);
+  if (!alreadyLoaded) target.innerHTML = '<p class="inline-reference-loading" role="status">Loading study notes…</p>';
   return feedbackReferenceRequest(cardId, feedback?.answerEventId).then((result) => {
     // A late note must never restore a previous review or overwrite a newer screen.
     if (root.querySelector("#feedbackReference") !== target) return;
-    target.innerHTML = result.ok ? inlineReferenceMarkup(result.value)
-      : '<p class="inline-reference-loading">Study notes could not load. <button class="quiet-button" type="button" data-feedback-reference-retry>Retry</button></p>';
-    bindReferenceLinks(target, state);
-    target.querySelector("[data-feedback-reference-retry]")?.addEventListener("click", () => loadFeedbackReference(target, state));
+    if (!alreadyLoaded) {
+      target.innerHTML = result.ok ? inlineReferenceMarkup(result.value)
+        : '<p class="inline-reference-loading">Study notes could not load. <button class="quiet-button" type="button" data-feedback-reference-retry>Retry</button></p>';
+      bindReferenceLinks(target, state);
+      target.querySelector("[data-feedback-reference-retry]")?.addEventListener("click", () => loadFeedbackReference(target, state));
+    }
+    const heading = root.querySelector(".feedback-heading");
+    const matches = answerConfusions.get(feedback?.answerEventId);
+    if (matches?.length && !heading?.classList.contains("has-confusion")) {
+      heading?.querySelector(".feedback-context")?.insertAdjacentHTML("beforeend", confusionMarkup(matches));
+      heading?.classList.add("has-confusion");
+      const bubble = heading?.querySelector(".reference-confusions");
+      if (bubble) bindReferenceLinks(bubble, state);
+    }
   });
 };
 
 const render = (state) => {
+  cancelHomeStats();
   const returningFromReference = Boolean(root.querySelector("#kanjiDialog") && !state.kanjiDetail);
   const { cardId: displayedCardId, feedback: visibleFeedback } = displayedAnswer(state);
   const comparisonOpen = root.querySelector("#feedbackReference")?.dataset.referenceCardId === displayedCardId
@@ -830,7 +874,7 @@ const render = (state) => {
   const waitingForLists = syncView === "lists" && state.studyLibraryPending && !state.studyListDetail;
   allowSyncApply = Boolean(state.settings && (["home", "settings", "onboarding"].includes(syncView) || waitingForLists) && !state.submitting);
   studySync?.attach(root.querySelector("[data-sync-panel]"));
-  if (allowSyncApply && (!wasAllowed || waitingForLists)) studySync?.schedule(0);
+  if (allowSyncApply && (!wasAllowed || waitingForLists)) studySync?.schedule(syncView === "home" ? homeSyncDelay : 0);
   const transition = (event) => render(reduceUi(state, event));
   const reloadStudyList = (lists, listId) => fetchJson(
     `/api/study-lists/${encodeURIComponent(listId)}/items`,
@@ -1150,7 +1194,14 @@ const render = (state) => {
   kanjiDialog && state.kanjiDetail?.scrollTop ? (kanjiDialog.scrollTop = state.kanjiDetail.scrollTop) : null;
   returningFromReference ? window.scrollTo(0, state.referencePageScroll ?? 0) : null;
   const feedbackReference = root.querySelector("#feedbackReference");
-  feedbackReference && !feedbackReferences.has(displayedCardId) ? loadFeedbackReference(feedbackReference, state) : null;
+  const needsHint = browserBuild && visibleFeedback?.correct === false && visibleFeedback.answerEventId
+    && !answerConfusions.has(visibleFeedback.answerEventId);
+  if (feedbackReference && (needsHint || !feedbackReferences.has(displayedCardId))) {
+    if (browserBuild) setTimeout(() => {
+      if (root.querySelector("#feedbackReference") === feedbackReference) loadFeedbackReference(feedbackReference, state);
+    }, 40);
+    else loadFeedbackReference(feedbackReference, state);
+  }
   return state;
 };
 
@@ -1164,9 +1215,7 @@ const hydrateBootstrap = (initialState, expectedNode) => Promise.all([
   root.firstElementChild !== expectedNode
     ? null
     : (render(hydratedState), hydratedState.view === "home"
-        ? ((homeNode) => fetchValue("/api/stats").then((stats) => stats.ok && root.querySelector(".home-main") === homeNode
-          ? render({ ...hydratedState, stats: stats.value })
-          : null))(root.querySelector(".home-main"))
+        ? scheduleHomeStats(hydratedState)
         : null))({
     ...initialState,
     decks: decksResult.ok ? decksResult.value.decks : [],
