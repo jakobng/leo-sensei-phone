@@ -2605,27 +2605,32 @@ var retainLocalStudy = (study, local) => {
   };
 };
 var identity = (event, body) => event.eventId ? `id:${event.eventId}` : `body:${body}`;
-var indexEvents = (events) => events.reduce((index, event) => {
-  const body = syncJson(event);
+var eventBody = (event, cache) => {
+  if (!cache || typeof event !== "object" || event === null) return syncJson(event);
+  if (!cache.has(event)) cache.set(event, syncJson(event));
+  return cache.get(event);
+};
+var indexEvents = (events, eventBodies) => events.reduce((index, event) => {
+  const body = eventBody(event, eventBodies);
   const id = identity(event, body);
   if (index.has(id) && index.get(id).body !== body) throw conflict("One review record differs between devices.");
   if (!index.has(id)) index.set(id, { event, body });
   return index;
 }, /* @__PURE__ */ new Map());
 var includesEvents = (all, subset) => [...subset].every(([key, { body }]) => all.get(key)?.body === body);
-var unionEvents = (first, second) => {
-  const index = indexEvents(first);
-  const other = indexEvents(second);
+var unionEvents = (first, index, other) => {
   if ([...other].some(([key, { body }]) => index.has(key) && index.get(key).body !== body)) {
     throw conflict("One review record differs between devices.");
   }
   return [...first, ...[...other].filter(([key]) => !index.has(key)).map(([, { event }]) => event)];
 };
 var appendStudyEvents = (local, incoming) => {
-  if (!includesEvents(indexEvents(incoming), indexEvents(local))) {
+  const localEvents = indexEvents(local);
+  const incomingEvents = indexEvents(incoming);
+  if (!includesEvents(incomingEvents, localEvents)) {
     throw conflict("Sync paused because the incoming copy is missing local review history.");
   }
-  return unionEvents(local, incoming);
+  return unionEvents(local, localEvents, incomingEvents);
 };
 
 // scripts/review-server.mjs
@@ -3588,7 +3593,7 @@ isMain ? createReviewServer().listen(
 // web/worker.mjs
 var scope = new URL(self.registration.scope);
 var cachePrefix = `leo-sensei:${scope.href}:`;
-var cacheName = cachePrefix + "070daea530d643a4855e7047";
+var cacheName = cachePrefix + "cf0be9a3606a101f18ce5d69";
 var assets = define_ASSETS_default.map((path) => new URL(path, scope).href);
 var shell = new URL("index.html", scope);
 var handle = createReviewServer({

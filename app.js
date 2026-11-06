@@ -47,8 +47,8 @@ const fetchJson = (url, options, callback) =>
     .then((response) => response.json().then((payload) => ({ response, payload })))
     .then(({ response, payload }) =>
       response.ok
-        ? (options?.method && options.method !== "GET" && url !== "/api/reading-check"
-            ? studySync?.schedule() : null,
+        ? (options?.method && options.method !== "GET" && !["/api/reading-check", "/api/sync/state"].includes(url)
+            ? studySync?.noteChange() : null,
           callback({ ok: true, value: browserSpeechAvailability(payload) }))
         : callback({ ok: false, code: payload.error, error: payload.message ?? payload.error ?? response.statusText }))
     .catch((requestError) => callback({ ok: false, error: requestError.message }));
@@ -81,13 +81,11 @@ const fetchValue = (url, options) => new Promise((resolve) => fetchJson(url, opt
 
 let syncView;
 let allowSyncApply = false;
-const homeSyncDelay = browserBuild ? 3000 : 0;
 const studySync = syncEnabled ? createStudySync({
   scope: new URL(".", import.meta.url).href,
   readLocal: () => fetchValue("/api/sync/state"),
   applyLocal: (data) => fetchValue("/api/sync/state", jsonMutationOptions("POST", data)),
   canApply: () => allowSyncApply,
-  idleDelay: homeSyncDelay,
   onApplied: () => allowSyncApply
     ? bootstrap("Study progress synced.", ["settings", "lists"].includes(syncView) ? syncView : null)
     : null,
@@ -908,7 +906,7 @@ const render = (state) => {
   const waitingForLists = syncView === "lists" && state.studyLibraryPending && !state.studyListDetail;
   allowSyncApply = Boolean(state.settings && (["home", "settings", "onboarding"].includes(syncView) || waitingForLists) && !state.submitting);
   studySync?.attach(root.querySelector("[data-sync-panel]"));
-  if (allowSyncApply && (!wasAllowed || waitingForLists)) studySync?.schedule(syncView === "home" ? homeSyncDelay : 0);
+  if (allowSyncApply && (!wasAllowed || waitingForLists)) studySync?.schedule();
   const transition = (event) => render(reduceUi(state, event));
   const reloadStudyList = (lists, listId) => fetchJson(
     `/api/study-lists/${encodeURIComponent(listId)}/items`,

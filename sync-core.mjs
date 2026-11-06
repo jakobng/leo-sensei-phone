@@ -6,7 +6,7 @@ const ordered = (value) => Array.isArray(value) ? value.map(ordered)
     ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, ordered(value[key])]))
     : value;
 export const syncJson = (value) => JSON.stringify(ordered(value));
-export const syncEqual = (left, right) => syncJson(left) === syncJson(right);
+export const syncEqual = (left, right) => left === right || syncJson(left) === syncJson(right);
 
 const isStudyCard = (card) => ["vocabulary", "kanji"].includes(card.type);
 const isStudyEvent = (event) => !event.type.startsWith("grammar_");
@@ -57,8 +57,13 @@ export const retainLocalStudy = (study, local) => {
 };
 
 const identity = (event, body) => event.eventId ? `id:${event.eventId}` : `body:${body}`;
-const indexEvents = (events) => events.reduce((index, event) => {
-  const body = syncJson(event);
+const eventBody = (event, cache) => {
+  if (!cache || typeof event !== "object" || event === null) return syncJson(event);
+  if (!cache.has(event)) cache.set(event, syncJson(event));
+  return cache.get(event);
+};
+const indexEvents = (events, eventBodies) => events.reduce((index, event) => {
+  const body = eventBody(event, eventBodies);
   const id = identity(event, body);
   if (index.has(id) && index.get(id).body !== body) throw conflict("One review record differs between devices.");
   if (!index.has(id)) index.set(id, { event, body });
@@ -66,9 +71,7 @@ const indexEvents = (events) => events.reduce((index, event) => {
 }, new Map());
 
 const includesEvents = (all, subset) => [...subset].every(([key, { body }]) => all.get(key)?.body === body);
-const unionEvents = (first, second) => {
-  const index = indexEvents(first);
-  const other = indexEvents(second);
+const unionEvents = (first, index, other) => {
   if ([...other].some(([key, { body }]) => index.has(key) && index.get(key).body !== body)) {
     throw conflict("One review record differs between devices.");
   }
@@ -76,10 +79,12 @@ const unionEvents = (first, second) => {
 };
 
 export const appendStudyEvents = (local, incoming) => {
-  if (!includesEvents(indexEvents(incoming), indexEvents(local))) {
+  const localEvents = indexEvents(local);
+  const incomingEvents = indexEvents(incoming);
+  if (!includesEvents(incomingEvents, localEvents)) {
     throw conflict("Sync paused because the incoming copy is missing local review history.");
   }
-  return unionEvents(local, incoming);
+  return unionEvents(local, localEvents, incomingEvents);
 };
 
 const mergeValue = (base, local, remote, label) => {
@@ -109,13 +114,13 @@ const emptyStudy = (state) => state.events.length === 0 && state.catalog.cards.l
   && state.customLists.length === 0 && !state.studyPlan?.customLists?.length;
 const documents = ({ events, ...rest }) => rest;
 
-export const mergeStudy = (base, local, remote) => {
+export const mergeStudy = (base, local, remote, eventBodies) => {
   if (!remote) {
     if (base) throw conflict("The cloud copy is missing. Check the sync repository before reconnecting.");
     return local;
   }
-  const localEvents = indexEvents(local.events);
-  const remoteEvents = indexEvents(remote.events);
+  const localEvents = indexEvents(local.events, eventBodies);
+  const remoteEvents = indexEvents(remote.events, eventBodies);
   if (!base) {
     if (emptyStudy(local)) return remote;
     if (emptyStudy(remote)) return local;
@@ -126,7 +131,7 @@ export const mergeStudy = (base, local, remote) => {
     throw conflict("Both devices already have different study data. Start by connecting the device with your main history, then connect a fresh browser on the other device.");
   }
 
-  const baseEvents = indexEvents(base.events);
+  const baseEvents = indexEvents(base.events, eventBodies);
   if (!includesEvents(localEvents, baseEvents) || !includesEvents(remoteEvents, baseEvents)) {
     throw conflict("One device restored an older copy of your history. Sync is paused so you can keep both copies.");
   }
@@ -134,7 +139,7 @@ export const mergeStudy = (base, local, remote) => {
     throw conflict("A synced study document is missing from one device. Sync is paused so you can keep both copies.");
   }
   // Keep cloud history in order; a device appends only events it has not seen.
-  const events = unionEvents(remote.events, local.events);
+  const events = unionEvents(remote.events, remoteEvents, localEvents);
   const settings = mergeFields(base.settings, local.settings, remote.settings, "the same study setting");
   const catalog = mergeCatalog(base.catalog, local.catalog, remote.catalog);
   const customLists = mergeValue(base.customLists, local.customLists, remote.customLists, "the imported lists");
@@ -147,5 +152,5 @@ export const mergeStudy = (base, local, remote) => {
   };
 };
 
-export const studyContains = (current, incoming) => syncEqual(documents(current), documents(incoming))
-  && includesEvents(indexEvents(current.events), indexEvents(incoming.events));
+export const studyContains = (current, incoming, eventBodies) => syncEqual(documents(current), documents(incoming))
+  && includesEvents(indexEvents(current.events, eventBodies), indexEvents(incoming.events, eventBodies));

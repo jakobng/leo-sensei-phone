@@ -46,25 +46,36 @@ const createConfigStore = (name) => {
 const syncError = (result) => Object.assign(new Error(result.error), { code: result.code });
 const validState = (state) => state?.version === 2 && Array.isArray(state.events)
   && Array.isArray(state.catalog?.cards) && Array.isArray(state.customLists) && state.settings;
+const uploadDelay = 8000;
+const cloudCheckInterval = 20000;
+const fullCheckInterval = 90000;
 
-export const syncStudyOnce = ({ config, readLocal, applyLocal, canApply, canStart = () => true, vault = createGitHubVault(config) }, retries = 2) =>
+export const syncStudyOnce = ({ config, readLocal, applyLocal, canApply, canStart = () => true, checkLocal = true,
+  vault = createGitHubVault(config) }, retries = 2) =>
   vault.read({ sha: config.remoteSha, state: config.base })
-    .then((remote) => canStart() ? readLocal().then((local) => ({ local, remote })) : null)
+    .then((remote) => {
+      if (!canStart()) return { deferred: true };
+      if (!checkLocal && remote && config.base && remote.sha === config.remoteSha) return { unchanged: true };
+      return readLocal().then((local) => ({ local, remote }));
+    })
     .then((snapshot) => {
-      if (!snapshot || !canStart()) return { deferred: true };
+      if (!canStart()) return { deferred: true };
+      if (snapshot.deferred || snapshot.unchanged) return snapshot;
       const { local, remote } = snapshot;
       if (!local.ok) throw syncError(local);
       if (remote && !validState(remote.state)) throw new Error("The cloud copy is incomplete.");
       const remoteStudy = remote && portableStudy(remote.state);
-      const merged = mergeStudy(config.base, local.value.state, remoteStudy);
-      const changedLocal = !studyContains(local.value.state, merged);
-      const changedRemote = !remoteStudy || !studyContains(remoteStudy, merged);
-      if (changedLocal && !canApply()) return { deferred: true };
+      const eventBodies = new WeakMap();
+      const merged = mergeStudy(config.base, local.value.state, remoteStudy, eventBodies);
+      const changedLocal = !studyContains(local.value.state, merged, eventBodies);
+      const changedRemote = !remoteStudy || !studyContains(remoteStudy, merged, eventBodies);
       const push = changedRemote ? vault.write(merged, remote?.sha) : Promise.resolve();
       return push.then((written) => {
         const remoteSha = changedRemote ? written?.content?.sha : remote?.sha;
         if (!changedLocal) return { base: merged, changedLocal, remoteSha };
-        if (!canApply()) return { deferred: true };
+        // The cloud has this device's changes. Keep the old merge base until
+        // the local copy has also received the other device's changes.
+        if (!canApply()) return { deferred: true, localChangesSynced: true };
         return applyLocal({ revision: local.value.revision, state: merged }).then((applied) => {
           if (!applied.ok) throw syncError(applied);
           return { base: merged, changedLocal, remoteSha };
@@ -72,12 +83,12 @@ export const syncStudyOnce = ({ config, readLocal, applyLocal, canApply, canStar
       });
     }).catch((error) => {
       if (error.code === "SYNC_RETRY" && retries > 0 && canStart()) {
-        return syncStudyOnce({ config, readLocal, applyLocal, canApply, canStart, vault }, retries - 1);
+        return syncStudyOnce({ config, readLocal, applyLocal, canApply, canStart, checkLocal, vault }, retries - 1);
       }
       throw error;
     });
 
-export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onApplied, idleDelay = 0 }) => {
+export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onApplied }) => {
   const name = `leo-sensei-sync:${scope}`;
   const supported = Boolean(globalThis.indexedDB && globalThis.crypto?.subtle && navigator.locks
     && globalThis.CompressionStream && globalThis.DecompressionStream);
@@ -85,9 +96,16 @@ export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onAppl
   let currentPanel;
   let running;
   let timer;
+  let wakeAt = Infinity;
+  let queued = false;
+  let changeVersion = 0;
+  let syncedVersion = 0;
+  let lastFullCheck = 0;
   let configured = false;
   let status = "Sync is off.";
-  const canStart = () => canApply() || (idleDelay > 0 && document.hidden);
+  const hasLocalChanges = () => changeVersion !== syncedVersion;
+  const canStart = () => canApply() || hasLocalChanges();
+  const syncedStatus = (date) => `Synced at ${date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`;
   const display = () => {
     if (!currentPanel?.isConnected) return;
     const connect = currentPanel.querySelector("[data-sync-connect]");
@@ -97,12 +115,22 @@ export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onAppl
     connected.hidden = !supported || !configured;
     [...currentPanel.querySelectorAll("button")].map((button) => { button.disabled = Boolean(running); });
   };
-  const sync = (newConfig) => {
-    if (!supported || running || (newConfig ? !canApply() : !configured || !canStart())) return;
+  const sync = (newConfig, poll = false) => {
+    if (!supported || (newConfig ? !canApply() : !configured || !canStart())) return;
+    if (running) {
+      if (!poll) queued = true;
+      return;
+    }
     if (navigator.onLine === false) {
       status = "Sync is offline. Your progress is saved here.";
       display();
       return;
+    }
+    const version = changeVersion;
+    const checkLocal = !poll || hasLocalChanges() || Date.now() - lastFullCheck >= fullCheckInterval;
+    if (checkLocal) {
+      clearTimeout(timer);
+      wakeAt = Infinity;
     }
     status = "Syncing…";
     running = navigator.locks.request(name, () => (
@@ -117,18 +145,25 @@ export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onAppl
         status = "Sync is off.";
         return;
       }
-      return syncStudyOnce({ config, readLocal, applyLocal, canApply, canStart }).then((result) => {
+      return syncStudyOnce({ config, readLocal, applyLocal, canApply, canStart, checkLocal }).then((result) => {
         if (result.deferred) {
+          if (result.localChangesSynced) syncedVersion = version;
           status = "Sync will resume when you return to Today or Settings.";
           return;
         }
-        const syncedAt = new Date().toISOString();
+        const syncedAt = new Date();
+        if (result.unchanged) {
+          status = syncedStatus(syncedAt);
+          return;
+        }
         const saved = configured && !newConfig && result.remoteSha && result.remoteSha === config.remoteSha && !result.changedLocal
           ? Promise.resolve()
-          : store.save({ ...config, base: result.base, remoteSha: result.remoteSha, syncedAt });
+          : store.save({ ...config, base: result.base, remoteSha: result.remoteSha, syncedAt: syncedAt.toISOString() });
         return saved.then(() => {
           configured = true;
-          status = `Synced at ${new Date(syncedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`;
+          syncedVersion = version;
+          lastFullCheck = syncedAt.getTime();
+          status = syncedStatus(syncedAt);
           if (result.changedLocal) onApplied();
         });
       });
@@ -137,13 +172,27 @@ export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onAppl
     }).finally(() => {
       running = undefined;
       display();
+      if (queued) {
+        queued = false;
+        schedule();
+      }
     });
     display();
   };
-  const schedule = (delay = 12000) => {
-    clearTimeout(timer);
+  const schedule = (delay = 0) => {
     if (!configured || !supported || !canStart()) return;
-    timer = setTimeout(() => sync(), delay);
+    const due = Date.now() + delay;
+    if (due >= wakeAt) return;
+    clearTimeout(timer);
+    wakeAt = due;
+    timer = setTimeout(() => {
+      wakeAt = Infinity;
+      sync();
+    }, delay);
+  };
+  const noteChange = () => {
+    changeVersion += 1;
+    schedule(uploadDelay);
   };
   const attach = (panel) => {
     currentPanel = panel;
@@ -177,21 +226,21 @@ export const createStudySync = ({ scope, readLocal, applyLocal, canApply, onAppl
   };
   if (!supported) {
     status = "Sync needs a recent browser with private storage enabled.";
-    return { attach, schedule };
+    return { attach, schedule, noteChange };
   }
   store.read().then((config) => {
     configured = Boolean(config);
     if (config) status = "Sync is connected.";
     display();
-    schedule(idleDelay);
+    schedule();
   }).catch(() => {
     status = "Could not open this browser’s sync settings.";
     display();
   });
-  globalThis.addEventListener("online", () => schedule(idleDelay));
+  globalThis.addEventListener("online", () => schedule());
   document.addEventListener("visibilitychange", () => {
-    schedule(document.hidden ? 0 : idleDelay);
+    if (!document.hidden || hasLocalChanges()) sync();
   });
-  setInterval(() => { if (!document.hidden && canApply()) sync(); }, 90000);
-  return { attach, schedule };
+  setInterval(() => { if (!document.hidden) sync(undefined, true); }, cloudCheckInterval);
+  return { attach, schedule, noteChange };
 };
