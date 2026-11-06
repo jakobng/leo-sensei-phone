@@ -1984,10 +1984,6 @@ dialog::backdrop {
     padding: 26px 16px 40px;
   }
 
-  .activity-value,
-  .activity-date.alternate {
-    display: none;
-  }
 }
 
 /* Study-list detail and kanji reference */
@@ -3069,13 +3065,42 @@ button.stat-metric:focus-visible {
   border-bottom: 0;
 }
 
+.activity-navigation,
+.activity-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.activity-navigation {
+  flex-wrap: wrap;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-controls .quiet-button {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 6px 10px;
+}
+
+.activity-viewport {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  border-top: 1px solid var(--line);
+}
+
 .activity-chart {
+  position: relative;
   height: 220px;
   display: grid;
-  grid-template-columns: repeat(30, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: max(32px, calc((100% - 203px) / 30));
   align-items: end;
   gap: 7px;
-  border-top: 1px solid var(--line);
   padding-top: 14px;
 }
 
@@ -3220,16 +3245,7 @@ button.stat-metric:focus-visible {
 @media (max-width: 640px) {
   .activity-chart {
     height: 164px;
-    gap: 3px;
-  }
-
-  .activity-day {
-    grid-template-rows: 1fr 16px;
-  }
-
-  .activity-value,
-  .activity-date.alternate {
-    display: none;
+    gap: 5px;
   }
 
   .activity-date {

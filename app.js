@@ -439,13 +439,64 @@ const compactDate = (value) => String(value ?? "").slice(5).replace("-", "/");
 const activityMarkup = (days) => ((maximum) => `
   <section class="activity-panel" aria-labelledby="activityTitle">
     <div class="detail-heading"><span>Completed reviews</span><h2 id="activityTitle">Study history</h2></div>
-    <div class="activity-chart">${days.map((entry, index) => `
-      <div class="activity-day">
-        <span class="activity-value">${entry.completed || ""}</span>
-        <div class="activity-bar-track"><div class="activity-bar ${entry.complete ? "complete" : ""}" style="height:${Math.max(4, entry.completed / maximum * 100)}%"></div></div>
-        <span class="activity-date ${index % 2 === 1 ? "alternate" : ""}">${compactDate(entry.studyDate)}</span>
-      </div>`).join("")}</div>
-  </section>`)(Math.max(1, ...days.map(({ completed }) => completed)));
+    <div class="activity-navigation">
+      <span data-activity-range></span>
+      <div class="activity-controls" aria-label="Study history navigation">
+        <button type="button" class="quiet-button" data-activity-move="oldest">Oldest</button>
+        <button type="button" class="quiet-button" data-activity-move="earlier" aria-label="Earlier days">←</button>
+        <button type="button" class="quiet-button" data-activity-move="later" aria-label="Later days">→</button>
+        <button type="button" class="quiet-button" data-activity-move="today">Today</button>
+      </div>
+    </div>
+    <div class="activity-viewport" tabindex="0" role="region" aria-label="Daily completed reviews. Scroll sideways to see earlier days.">
+      <div class="activity-chart">${days.map((entry, index) => `
+        <div class="activity-day" title="${escapeHtml(entry.studyDate)} · ${entry.completed.toLocaleString()} completed">
+          <span class="activity-value">${entry.completed.toLocaleString()}</span>
+          <div class="activity-bar-track" aria-hidden="true">${entry.completed > 0 ? `<div class="activity-bar ${entry.complete ? "complete" : ""}" style="height:${entry.completed / maximum * 100}%"></div>` : ""}</div>
+          <time class="activity-date" datetime="${escapeHtml(entry.studyDate)}">${index === days.length - 1 ? "Today" : compactDate(entry.studyDate)}</time>
+        </div>`).join("")}</div>
+    </div>
+  </section>`)(days.reduce((highest, { completed }) => Math.max(highest, completed), 1));
+
+let activityOffset = 0;
+let activityResizeObserver;
+const bindActivityHistory = () => {
+  const viewport = root.querySelector(".activity-viewport");
+  const chart = viewport?.firstElementChild;
+  const firstDay = chart?.firstElementChild;
+  if (!firstDay) return;
+  const range = root.querySelector("[data-activity-range]");
+  const controls = [...root.querySelectorAll("[data-activity-move]")];
+  const rightEdge = () => Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+  const dayWidth = () => firstDay.nextElementSibling ? firstDay.nextElementSibling.offsetLeft - firstDay.offsetLeft : firstDay.offsetWidth;
+  const dateAt = (index) => chart.children[Math.min(chart.children.length - 1, index)]?.querySelector("time").dateTime;
+  const update = () => {
+    const left = Math.max(0, viewport.scrollLeft);
+    activityOffset = Math.max(0, rightEdge() - left);
+    const stride = Math.max(1, dayWidth());
+    const from = dateAt(Math.floor(left / stride));
+    const through = dateAt(Math.floor((left + viewport.clientWidth - 1) / stride));
+    range.textContent = from === through ? from : `${from} – ${through}`;
+    controls.map((button) => {
+      button.disabled = ["oldest", "earlier"].includes(button.dataset.activityMove) ? left < 1 : activityOffset < 1;
+    });
+  };
+  const restore = () => {
+    viewport.scrollLeft = Math.max(0, rightEdge() - activityOffset);
+    update();
+  };
+  controls.map((button) => button.addEventListener("click", () => {
+    const direction = button.dataset.activityMove;
+    const page = Math.max(1, Math.floor(viewport.clientWidth / dayWidth())) * dayWidth();
+    if (direction === "oldest" || direction === "today") viewport.scrollLeft = direction === "oldest" ? 0 : rightEdge();
+    else viewport.scrollLeft += direction === "earlier" ? -page : page;
+    update();
+  }));
+  viewport.addEventListener("scroll", update, { passive: true });
+  restore();
+  activityResizeObserver = new ResizeObserver(restore);
+  activityResizeObserver.observe(viewport);
+};
 
 const metricMarkup = (label, value, detail) => `
   <div class="stat-metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail)}</small></div>`;
@@ -491,7 +542,7 @@ const detailedStatsMarkup = (state) => state.stats ? ((mastery, days) => `
     </section>
   </section>`)(
   Array.isArray(state.stats.mastery) ? state.stats.mastery : [],
-  Array.isArray(state.stats.activity?.days) ? state.stats.activity.days.slice(-30) : [],
+  Array.isArray(state.stats.activity?.days) ? state.stats.activity.days : [],
 ) : "";
 
 const homeMarkup = (state) => ((reviews, plannedNew) => `
@@ -864,11 +915,13 @@ const loadFeedbackReference = (target, state) => {
 
 const render = (state) => {
   cancelHomeStats();
+  activityResizeObserver?.disconnect();
   const returningFromReference = Boolean(root.querySelector("#kanjiDialog") && !state.kanjiDetail);
   const { cardId: displayedCardId, feedback: visibleFeedback } = displayedAnswer(state);
   const comparisonOpen = root.querySelector("#feedbackReference")?.dataset.referenceCardId === displayedCardId
     ? [...root.querySelectorAll("#feedbackReference [data-comparison][open]")].map((node) => node.dataset.comparison) : [];
   root.innerHTML = state.daily && state.settings ? pageMarkup(state, feedbackReferences.get(displayedCardId), comparisonOpen) : '<div class="loading">Loading today’s session</div>';
+  bindActivityHistory();
   const wasAllowed = allowSyncApply;
   syncView = state.view;
   const waitingForLists = syncView === "lists" && state.studyLibraryPending && !state.studyListDetail;

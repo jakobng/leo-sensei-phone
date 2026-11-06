@@ -2286,6 +2286,14 @@ var studyDays = (count, now, timeZone) => Array.from(
   { length: count },
   (_, index) => studyDate(new Date(Date.parse(now) - (count - index - 1) * day2), timeZone)
 );
+var activityStudyDays = (today, recordedDates) => {
+  const last = Date.parse(`${today}T00:00:00.000Z`);
+  const first = recordedDates.reduce((earliest, date) => {
+    const timestamp = Date.parse(`${date}T00:00:00.000Z`);
+    return Number.isFinite(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === date ? Math.min(earliest, timestamp) : earliest;
+  }, last - 29 * day2);
+  return Array.from({ length: (last - first) / day2 + 1 }, (_, index) => new Date(first + index * day2).toISOString().slice(0, 10));
+};
 var validTime = (value) => Number.isFinite(Date.parse(value ?? ""));
 var levelFor = (state) => Number.isInteger(state?.stage) ? Math.min(9, Math.max(1, state.stage)) : null;
 var activeLevelFor = (state) => state?.known ? null : levelFor(state);
@@ -2454,7 +2462,7 @@ var deriveStats = ({ catalog, cardStates, events = [], now = (/* @__PURE__ */ ne
   const answersByDate = Object.groupBy(answers2, (event) => eventStudyDate2(event, timeZone));
   const sessions = sessionsByDate(learningEvents, timeZone);
   const completeByDate = completionByDate(learningEvents, sessions, answersByDate, now, timeZone);
-  const activityDays = studyDays(30, now, timeZone);
+  const activityDays = activityStudyDays(studyDate(now, timeZone), [...Object.keys(answersByDate), ...Object.keys(sessions)]);
   const answeredIds = new Set(answers2.map((event) => event.cardId));
   const within = (count) => new Set(studyDays(count, now, timeZone));
   return {
@@ -3580,7 +3588,7 @@ isMain ? createReviewServer().listen(
 // web/worker.mjs
 var scope = new URL(self.registration.scope);
 var cachePrefix = `leo-sensei:${scope.href}:`;
-var cacheName = cachePrefix + "c70f129d81c0967f8c14847a";
+var cacheName = cachePrefix + "de8856b811847a9367a5e372";
 var assets = define_ASSETS_default.map((path) => new URL(path, scope).href);
 var shell = new URL("index.html", scope);
 var handle = createReviewServer({
