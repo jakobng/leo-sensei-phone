@@ -9,6 +9,9 @@ import { gatedApplicationOptions, onboardingSettings } from "./onboarding-core.m
 import { initialUiState, reduceUi, reviewReserve } from "./ui-core.mjs";
 import { confusionMarkup, inlineReferenceMarkup, referenceContentMarkup } from "./reference-content.mjs";
 import { jsonMutationOptions } from "./http.mjs";
+import {
+  bindStudyPairHome, bindStudyPairPage, bindStudyPairPicker, studyPairHomeMarkup, studyPairPickerMarkup, studyPairTarget,
+} from "./study-pairs.mjs";
 import { createStudySync, syncPanelMarkup } from "./sync-client.mjs";
 import {
   copyVoiceCustomizationPrompt,
@@ -232,7 +235,8 @@ const displayedAnswer = (state) => state.answerReturn ? state.previousAnswer : {
 
 const feedbackMarkup = (state, reference = null, comparisonOpen = []) => {
   const { cardId, feedback } = displayedAnswer(state);
-  const readOnly = Boolean(state.answerReturn);
+  const lookingBack = Boolean(state.answerReturn);
+  const pairTarget = studyPairTarget({ cardId, feedback });
   const readingAlias = !feedback.readingCorrect && feedback.submittedReading
     ? aliasButton("reading", feedback.submittedReading, feedback.aliasSaved, state.aliasSaving)
     : "";
@@ -243,7 +247,7 @@ const feedbackMarkup = (state, reference = null, comparisonOpen = []) => {
   const confusions = answerConfusions.get(feedback.answerEventId) ?? feedback.confusions;
   return `
     <div class="feedback-page"><section class="feedback-stage ${resultClass} kind-${escapeHtml(feedback.cardType)}">
-      ${readOnly ? '<p class="previous-answer-label">Previous answer <span>· Read only</span></p>' : previousAnswerMarkup(state)}
+      ${lookingBack ? '<p class="previous-answer-label">Previous answer</p>' : previousAnswerMarkup(state)}
       <div class="feedback-heading${confusions?.length ? " has-confusion" : ""}">
         <span class="feedback-symbol" aria-hidden="true">${feedback.correct ? "✓" : "×"}</span>
         <div class="feedback-answer">
@@ -260,7 +264,7 @@ const feedbackMarkup = (state, reference = null, comparisonOpen = []) => {
           ${feedback.submittedReading || feedback.submittedMeaning ? "" : answerResult("Japanese", feedback.submittedReverse, feedback.correct)}</div>
       </div>
       <div class="feedback-tools">${state.daily.speechAvailable ? `<button id="audioButton" class="audio-button" type="button" title="Play Japanese pronunciation"><span aria-hidden="true">▶</span><span>Hear again</span></button>` : ""}</div>
-      ${readOnly ? '<div class="feedback-actions single"><button id="returnToReviewButton" class="primary-button continue-button" type="button" data-enter-next>Return to review</button></div>' : `
+      ${lookingBack ? '<div class="feedback-actions single"><button id="returnToReviewButton" class="primary-button continue-button" type="button" data-enter-next>Return to review</button></div>' : `
       <details class="feedback-editor" ${state.aliasSaving || feedback.aliasSaved || state.savedAlias?.cardId === state.currentId ? "open" : ""}>
         <summary>Edit accepted answers</summary>
         ${readingAlias || meaningAlias ? `<div class="alias-actions">${readingAlias}${meaningAlias}</div>` : ""}
@@ -272,8 +276,9 @@ const feedbackMarkup = (state, reference = null, comparisonOpen = []) => {
           ? `<button id="redoButton" class="quiet-button redo-button" type="button" ${state.submitting || state.aliasSaving ? "disabled" : ""}><span aria-hidden="true">↻</span><span>Redo word</span></button>`
           : ""}
         <button id="continueButton" class="primary-button continue-button" type="button" data-enter-next ${state.submitting || state.aliasSaving ? "disabled" : ""} autofocus>Continue</button>
-      </div>
-      <button id="finishEarlyButton" class="finish-early" type="button" ${state.aliasSaving ? "disabled" : ""}>Finish for now</button>`}
+      </div>`}
+      ${pairTarget ? studyPairPickerMarkup(pairTarget.type) : ""}
+      ${lookingBack ? "" : `<button id="finishEarlyButton" class="finish-early" type="button" ${state.aliasSaving ? "disabled" : ""}>Finish for now</button>`}
     </section>
     <section class="feedback-reference" aria-label="Study notes">
       <header><h2>Study notes</h2></header>
@@ -287,14 +292,32 @@ const firstTryMarkup = (daily) => daily.firstTry
   ? `<div class="first-try-stat"><strong>${Math.round(Number(daily.firstTry.rate ?? 0) * 100)}%</strong><span>right first time</span><small>${Number(daily.firstTry.correct ?? 0)} of ${Number(daily.firstTry.attempted ?? 0)} cards</small></div>`
   : "";
 
-const completeMarkup = (state) => `
+const grammarDrillLink = (drill, label, optional = false) => `<a class="${optional ? "quiet-button" : "primary-button"} grammar-drill-link" href="${escapeHtml(drill.drillUrl)}" target="_blank" rel="noopener">${escapeHtml(label)}</a>`;
+
+const grammarRemainingText = (drill) => `${drill.remaining} more grammar answer${drill.remaining === 1 ? "" : "s"} in Daigan’s drill`;
+
+const grammarPendingMarkup = (state) => ((drill) => `
+  <section class="complete-stage" data-grammar-pending>
+    <span>Daily study</span>
+    <h1>Reviews done · grammar left</h1>
+    <p>${escapeHtml(grammarRemainingText(drill))} to unlock extra reviews and your computer.</p>
+    <div class="completion-actions">${grammarDrillLink(drill, "Open grammar drill")}</div>
+    ${previousAnswerMarkup(state)}
+  </section>`)(state.daily.grammarDrill);
+
+const completeMarkup = (state) => !state.daily.extra && !state.daily.complete && state.daily.grammarDrill?.available
+  ? grammarPendingMarkup(state)
+  : `
   <section class="complete-stage">
     <div class="completion-mark" aria-hidden="true">✓</div>
     <span>${state.daily.lesson ? "New words" : state.daily.practice ? "Practice" : state.daily.extra ? "Extra study" : "Daily study"}</span>
     <h1>${state.daily.lesson ? "Lesson complete" : state.daily.practice ? "Practice complete" : state.daily.extra ? "Batch complete" : "You’re clear for today"}</h1>
     <p>${state.daily.lesson ? "These cards are now in your review schedule." : state.daily.practice ? "Correct answers do not promote cards; mistakes may lower their level." : state.daily.extra ? "Scheduling state updated." : browserBuild ? "Today’s review goal is complete." : "Work access is open."}</p>
     ${state.daily.lesson ? "" : firstTryMarkup(state.daily)}
-    <div class="completion-actions">${state.daily.lesson || state.daily.practice || Number(state.daily.availableReviews ?? 0) === 0 ? "" : `<button id="extraButton" class="primary-button" type="button" data-enter-next>Continue reviews (${Number(state.daily.availableReviews).toLocaleString()})</button>`}</div>
+    <div class="completion-actions">
+      ${state.daily.lesson || state.daily.practice || Number(state.daily.availableReviews ?? 0) === 0 ? "" : `<button id="extraButton" class="primary-button" type="button" data-enter-next>Continue reviews (${Number(state.daily.availableReviews).toLocaleString()})</button>`}
+      ${!state.daily.extra && state.daily.grammarDrill ? grammarDrillLink(state.daily.grammarDrill, "More grammar (optional)", true) : ""}
+    </div>
     ${previousAnswerMarkup(state)}
   </section>`;
 
@@ -524,14 +547,36 @@ const detailedStatsMarkup = (state) => state.stats ? ((mastery, days) => `
   Array.isArray(state.stats.activity?.days) ? state.stats.activity.days : [],
 ) : "";
 
+const grammarHomeMarkup = (drill) => {
+  if (!drill) return "";
+  const goalProgress = drill.available ? Math.min(drill.answeredToday, drill.minimum) : 0;
+  const goalStatus = !drill.available
+    ? "Couldn’t check the drill · not blocking"
+    : drill.cleared
+      ? "Goal met · more grammar is optional"
+      : `${drill.remaining} more answer${drill.remaining === 1 ? "" : "s"} to unlock extra reviews`;
+  return `
+      <div class="home-group grammar-home-group"><div class="home-group-label">Grammar · Daigan’s drill</div><div class="home-pair">
+        <a class="home-action grammar-drill-action review-state-${!drill.available ? "unlocked" : drill.cleared ? "complete" : "pending"}" href="${escapeHtml(drill.drillUrl)}" target="_blank" rel="noopener">
+          <span>Today’s grammar goal</span>
+          <strong>${drill.available ? `${goalProgress} / ${drill.minimum}` : "–"}</strong>
+          <div class="review-reserve-track" aria-hidden="true"><div class="review-reserve-fill" style="width:${drill.available ? goalProgress / drill.minimum * 100 : 0}%"></div></div>
+          <small>${escapeHtml(goalStatus)}</small>
+          ${drill.available ? `<small>${Number(drill.due).toLocaleString()} due in the drill</small>` : ""}
+        </a>
+      </div></div>`;
+};
+
 const homeMarkup = (state) => ((reviews, plannedNew) => `
   ${managementHeaderMarkup(state, "Today")}
   <main class="home-main">
     <section class="home-actions-groups" aria-label="Today's study">
       <div class="home-group vocab-home-group"><div class="home-group-label">Vocab &amp; Kanji</div><div class="home-pair">
-        <button id="homeReviewButton" class="home-action review-action review-state-${reviews.unlocked ? reviews.backlogRemaining > 0 ? "unlocked" : "complete" : "pending"}" type="button"><span>Reviews</span><strong>${reviews.completed.toLocaleString()} / ${reviews.total.toLocaleString()}</strong><div class="review-reserve-track" aria-label="${reviews.completed} of ${reviews.total} reviews cleared${browserBuild ? "" : `, unlock at ${reviews.threshold}`}"><div class="review-reserve-fill" style="width:${reviews.fillPct}%"></div>${browserBuild ? "" : `<div class="review-unlock-marker" style="left:${reviews.markerPct}%" title="Unlock at ${reviews.threshold}">${reviews.threshold}</div>`}</div><small>${browserBuild ? `${reviews.backlogRemaining.toLocaleString()} reviews remain` : reviews.unlocked ? reviews.backlogRemaining === 0 ? "All reviews cleared · laptop unlocked" : `Laptop unlocked · ${reviews.backlogRemaining.toLocaleString()} reviews remain` : `Clear ${Math.max(0, reviews.threshold - reviews.gateCleared)} more to unlock your computer`}</small></button>
+        <button id="homeReviewButton" class="home-action review-action review-state-${reviews.reviewsDone ? reviews.backlogRemaining > 0 ? "unlocked" : "complete" : "pending"}" type="button"><span>Reviews</span><strong>${reviews.completed.toLocaleString()} / ${reviews.total.toLocaleString()}</strong><div class="review-reserve-track" aria-label="${reviews.completed} of ${reviews.total} reviews cleared${browserBuild ? "" : `, unlock at ${reviews.threshold}`}"><div class="review-reserve-fill" style="width:${reviews.fillPct}%"></div>${browserBuild ? "" : `<div class="review-unlock-marker" style="left:${reviews.markerPct}%" title="Unlock at ${reviews.threshold}">${reviews.threshold}</div>`}</div><small>${browserBuild ? `${reviews.backlogRemaining.toLocaleString()} reviews remain` : reviews.unlocked ? reviews.backlogRemaining === 0 ? "All reviews cleared · laptop unlocked" : `Laptop unlocked · ${reviews.backlogRemaining.toLocaleString()} reviews remain` : reviews.reviewsDone ? "Reviews cleared · grammar still to do" : `Clear ${Math.max(0, reviews.threshold - reviews.gateCleared)} more to unlock your computer`}</small></button>
         <button id="homeLessonButton" class="home-action lesson-action" type="button" ${plannedNew === 0 || state.submitting ? "disabled" : ""}><span>${dailyLessonComplete(state.daily) ? "Learn more words" : "Learn new words"}</span><strong>${state.daily.todayLesson?.completed ?? 0} / ${state.daily.todayLesson?.total || plannedNew}</strong><div class="review-reserve-track"><div class="review-reserve-fill" style="width:${state.daily.todayLesson?.total ? Number(state.daily.todayLesson.completed ?? 0) / Number(state.daily.todayLesson.total) * 100 : 0}%"></div></div><small>${plannedNew === 0 ? "Set a study list" : dailyLessonComplete(state.daily) ? "Add another batch" : state.daily.todayLesson?.total > 0 ? "Lesson in progress" : "Ready when you are"}</small></button>
       </div></div>
+      ${grammarHomeMarkup(state.daily.grammarDrill)}
+      ${studyPairHomeMarkup()}
     </section>
     ${detailedStatsMarkup(state)}
   </main>`)(reviewReserve(state.daily), state.studyLists.reduce((total, list) => total + studyListDailyNew(state, list), 0));
@@ -656,7 +701,7 @@ const pageMarkup = (state, reference = null, comparisonOpen = []) => {
       ? feedbackMarkup(state, reference, comparisonOpen)
       : state.lessonPreviewIndex >= 0
         ? lessonPreviewMarkup(state)
-    : state.daily.complete
+    : (state.daily.reviewsComplete ?? state.daily.complete)
       ? completeMarkup(state)
       : card
         ? answerMarkup(state, card)
@@ -667,6 +712,11 @@ const pageMarkup = (state, reference = null, comparisonOpen = []) => {
       ? homeMarkup(state)
       : state.view === "lists"
         ? studyListsMarkup(state)
+    : state.view === "study-pairs"
+      ? `${managementHeaderMarkup(state, "Similar Kanji & Words")}
+         <main class="management-main study-pair-main" data-study-pair-page tabindex="-1">
+           <p role="status">Loading saved groups…</p>
+         </main>`
     : state.view === "settings"
       ? settingsMarkup(state)
       : state.view === "voice"
@@ -748,6 +798,9 @@ const persistSettings = ({ state, form, nextView }) => ((settingsResult) => sett
   : render({ ...state, submitting: false, error: settingsResult.error.join(" ") }))(settingsFromForm(form));
 
 let statsTimer;
+let grammarTimer;
+let refreshOnReturn = null;
+document.addEventListener("visibilitychange", () => document.visibilityState === "visible" ? refreshOnReturn?.() : undefined);
 const cancelHomeStats = () => {
   clearTimeout(statsTimer);
   statsTimer = undefined;
@@ -762,7 +815,7 @@ const scheduleHomeStats = (state) => {
   statsTimer = timer;
 };
 
-const openView = (state, view) => {
+const openView = (state, view, studyPairMode) => {
   cancelHomeStats();
   if (view === "review") allowSyncApply = false;
   return view === "review"
@@ -797,7 +850,7 @@ const openView = (state, view) => {
             notice: null,
           })
         : render({ ...state, error: [daily, lists].find((result) => !result.ok)?.error }))
-    : render({ ...state, view, error: null, notice: null });
+    : render({ ...state, view, studyPairMode, error: null, notice: null });
 };
 
 const downloadBackup = (state) => fetchJson("/api/backup", undefined, (result) => result.ok
@@ -894,12 +947,21 @@ const loadFeedbackReference = (target, state) => {
 
 const render = (state) => {
   cancelHomeStats();
+  clearInterval(grammarTimer);
   activityResizeObserver?.disconnect();
   const returningFromReference = Boolean(root.querySelector("#kanjiDialog") && !state.kanjiDetail);
   const { cardId: displayedCardId, feedback: visibleFeedback } = displayedAnswer(state);
   const comparisonOpen = root.querySelector("#feedbackReference")?.dataset.referenceCardId === displayedCardId
     ? [...root.querySelectorAll("#feedbackReference [data-comparison][open]")].map((node) => node.dataset.comparison) : [];
   root.innerHTML = state.daily && state.settings ? pageMarkup(state, feedbackReferences.get(displayedCardId), comparisonOpen) : '<div class="loading">Loading today’s session</div>';
+  const grammarPending = root.querySelector("[data-grammar-pending]");
+  const checkGrammar = () => fetchValue("/api/daily").then(({ ok, value }) =>
+    ok && root.querySelector("[data-grammar-pending]") === grammarPending
+      && (value.studyDate !== state.daily.studyDate || value.complete || value.grammarDrill?.remaining !== state.daily.grammarDrill.remaining)
+      ? render(stateWithDaily(state, value)) : null);
+  refreshOnReturn = grammarPending ? checkGrammar : state.view === "home" && state.daily?.grammarDrill
+    ? () => openView(state, "home") : null;
+  if (grammarPending) grammarTimer = setInterval(() => document.visibilityState === "visible" ? checkGrammar() : null, 10_000);
   bindActivityHistory();
   const wasAllowed = allowSyncApply;
   syncView = state.view;
@@ -917,8 +979,20 @@ const render = (state) => {
   );
   [...root.querySelectorAll("[data-view]")].map((button) => button.addEventListener(
     "click",
-    () => openView(state, button.dataset.view),
+    () => openView(state, button.dataset.view, button.dataset.pairMode),
   ));
+  const studyPairHome = root.querySelector("[data-study-pair-home]");
+  if (studyPairHome) bindStudyPairHome(studyPairHome, fetchValue);
+  const studyPairPage = root.querySelector("[data-study-pair-page]");
+  if (studyPairPage) bindStudyPairPage(studyPairPage, {
+    fetchValue, mode: state.studyPairMode, speak: state.daily.speechAvailable ? speak : null,
+  });
+  const picker = root.querySelector("[data-study-pair-picker]");
+  if (picker) bindStudyPairPicker(picker, {
+    fetchValue,
+    ...studyPairTarget({ cardId: displayedCardId, feedback: visibleFeedback }),
+    hint: () => (answerConfusions.get(visibleFeedback.answerEventId) ?? visibleFeedback.confusions)?.[0],
+  });
   root.querySelector("#finishEarlyButton")?.addEventListener("click", () => transition({ type: "summary_opened" }));
   root.querySelector("#resumeButton")?.addEventListener("click", () => transition({ type: "summary_closed" }));
   [...root.querySelectorAll("[data-stats-tab]")].map((button) => button.addEventListener(

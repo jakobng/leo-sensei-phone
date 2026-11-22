@@ -75,3 +75,8 @@ still lacking examples. The source directory
 must never be a learner-state directory. Curated look-alike coverage is incomplete;
 shared components are not substituted for missing visual-similarity judgments.
 Diagrams describe visual components, not historical etymology.
+
+Memory stories are original learning aids. The app uses individually written
+stories where available and builds the rest offline from these component
+diagrams and English meanings. For imported kanji it can also use the card's
+English meaning. The scenes are fictional.

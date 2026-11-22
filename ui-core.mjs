@@ -20,6 +20,7 @@ export const reviewReserve = (daily) => ((progress) => ((completed, backlogRemai
   markerPct: total > 0 ? Math.min(100, progress.required / total * 100) : 0,
   fillPct: total > 0 ? Math.min(100, completed / total * 100) : 0,
   unlocked: Boolean(daily.complete),
+  reviewsDone: Boolean(daily.reviewsComplete ?? daily.complete),
 }))(progress.required + Number(daily.extraReviewsDone ?? 0) + backlogRemaining))(
   progress.cleared + Number(daily.extraReviewsDone ?? 0),
   Number(daily.availableReviews ?? 0),
@@ -66,7 +67,7 @@ export const initialUiState = (daily = null) => ({
   grammar: null,
   homeGrammar: null,
   summaryOpen: false,
-  lessonPreviewIndex: daily?.lesson && !daily.complete && (daily.lessonCards?.length ?? 0) > 0 ? 0 : -1,
+  lessonPreviewIndex: daily?.lesson && !(daily.reviewsComplete ?? daily.complete) && (daily.lessonCards?.length ?? 0) > 0 ? 0 : -1,
   error: null,
 });
 

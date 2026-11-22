@@ -12,9 +12,9 @@ export const referenceLinkMarkup = (entry, label = null) => `<button class="refe
   data-reference-reading="${escapeHtml(entry.reading ?? "")}">${label ?? `<strong lang="ja">${escapeHtml(entry.item)}</strong>
   <span lang="ja">${escapeHtml(entry.reading ?? "")}</span><small>${meanings(entry)}</small>`}</button>`;
 
-const diagram = (parts, literal, shared = null) => parts?.length
+export const referenceDiagramMarkup = (parts, literal, isShared = () => false) => parts?.length
   ? `<svg class="reference-diagram" viewBox="0 0 109 109" role="img" aria-label="Components of ${escapeHtml(literal)}">
-      ${parts.map((part, i) => `<g class="${shared?.includes(part.literal) ? "part-shared" : `part-${i % 5}`}">
+      ${parts.map((part, i) => `<g class="${isShared(part) ? "part-shared" : `part-${i % 5}`}">
         ${(part.paths ?? []).map((path) => `<path d="${escapeHtml(path)}" />`).join("")}</g>`).join("")}</svg>`
   : `<strong class="reference-glyph" lang="ja">${escapeHtml(literal)}</strong>`;
 
@@ -24,20 +24,26 @@ const comparison = (current, other) => ((shared) => `<details class="reference-c
     <div class="comparison-pair">${[
       { item: current.item, diagram: current.components, meanings: current.meanings,
         reading: [...(current.onReadings ?? []), ...(current.kunReadings ?? [])].join(" · ") }, other,
-    ].map((entry) => `<figure>${diagram(entry.diagram, entry.item, shared)}<figcaption><strong lang="ja">${escapeHtml(entry.item)}</strong>
+    ].map((entry) => `<figure>${referenceDiagramMarkup(entry.diagram, entry.item, (part) => shared.includes(part.literal))}<figcaption><strong lang="ja">${escapeHtml(entry.item)}</strong>
       <span>${meanings(entry)}</span><small lang="ja">${escapeHtml(entry.reading ?? "")}</small></figcaption></figure>`).join("")}</div>
     <p class="reference-note">Shared parts are grey; different parts are coloured.</p>
     ${referenceLinkMarkup(other, `Explore <span lang="ja">${escapeHtml(other.item)}</span>`)}</details>`)(
   (current.components ?? []).map((part) => part.literal).filter((literal) => literal && other.parts?.includes(literal)),
 );
 
+export const kanjiStoryMarkup = (story) => story ? `<p class="kanji-story">
+  <strong>Memory story</strong>
+  ${story.split(/([\p{Script=Han}\p{Script=Katakana}⺀-⻳]+)/u).map((part, i) => i % 2
+    ? `<b lang="ja">${escapeHtml(part)}</b>` : escapeHtml(part)).join("")}</p>` : "";
+
 const kanjiMarkup = (entry, inline = false) => `
-  <div class="reference-overview">${diagram(entry.components, entry.item)}<div>
+  <div class="reference-overview">${referenceDiagramMarkup(entry.components, entry.item)}<div>
     ${inline ? '<h3>Structure & readings</h3>' : `<h2 lang="ja">${escapeHtml(entry.item)}</h2><p class="reference-meaning">${meanings(entry)}</p>`}
     <dl><dt>On readings</dt><dd lang="ja">${escapeHtml(entry.onReadings?.join(" · ") || "—")}</dd>
       <dt>Kun readings</dt><dd lang="ja">${escapeHtml(entry.kunReadings?.join(" · ") || "—")}</dd></dl>
     ${entry.nanoriReadings?.length ? `<details><summary>Name readings</summary><p lang="ja">${escapeHtml(entry.nanoriReadings.join(" · "))}</p></details>` : ""}
   </div></div>
+  ${kanjiStoryMarkup(entry.story)}
   ${section("Components", entry.components?.length ? `<div class="reference-components">${entry.components.filter((part) => part.literal).map((part, i) => `
     <div class="reference-part part-${i % 5}">${referenceLinkMarkup({ ...part, item: part.item || part.original || part.literal, type: "kanji" },
       `<strong lang="ja">${escapeHtml(part.literal)}</strong><span>${escapeHtml(part.meaning)}</span><small>${escapeHtml(part.position)}</small>`)}</div>`).join("")}</div>
@@ -71,7 +77,7 @@ const senseMarkup = (sense) => `<div class="reference-sense"><p class="reference
 
 const kanjiCards = (entry) => section("Kanji in this word", entry.components?.length ? `<div class="inline-kanji-grid">${entry.components.map((part) => `
   <article class="inline-kanji-card">
-    ${referenceLinkMarkup(part, `${diagram(part.diagram, part.item)}<span><strong lang="ja">${escapeHtml(part.item)}</strong><small>${meanings(part)}</small></span>`)}
+    ${referenceLinkMarkup(part, `${referenceDiagramMarkup(part.diagram, part.item)}<span><strong lang="ja">${escapeHtml(part.item)}</strong><small>${meanings(part)}</small></span>`)}
     <dl><dt>On</dt><dd lang="ja">${escapeHtml(part.onReadings?.join(" · ") || "—")}</dd>
       <dt>Kun</dt><dd lang="ja">${escapeHtml(part.kunReadings?.join(" · ") || "—")}</dd>
       ${part.radicalInfo ? `<dt>Radical</dt><dd><span lang="ja">${escapeHtml(part.radicalInfo.literal)}</span> · ${escapeHtml(part.radicalInfo.meaning)}<small lang="ja">${escapeHtml(part.radicalInfo.names)}</small></dd>` : ""}

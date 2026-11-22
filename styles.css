@@ -1011,11 +1011,6 @@ a:focus-visible {
   font-weight: 700;
 }
 
-.previous-answer-label span {
-  color: var(--muted);
-  font-weight: 400;
-}
-
 .kind-label,
 .queue-count,
 .prompt-label,
@@ -3352,6 +3347,20 @@ button.stat-metric:focus-visible {
   background: #fff5d9;
 }
 
+a.home-action,
+.grammar-drill-link {
+  text-decoration: none;
+}
+
+.grammar-drill-link {
+  min-height: 44px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid;
+  border-radius: 7px;
+  padding: 0 22px;
+}
+
 .home-action > span,
 .home-action small {
   color: var(--muted);
@@ -3808,6 +3817,22 @@ button.stat-metric:focus-visible {
 .kanji-dialog-header { position: sticky; top: 0; z-index: 1; gap: 12px; background: var(--surface); }
 .kanji-dialog-header > span { flex: 1; }
 .reference-overview { display: grid; grid-template-columns: 175px minmax(0, 1fr); gap: 24px; align-items: center; padding: 26px; }
+.kanji-story {
+  margin: 0 26px 22px;
+  padding: 14px 16px;
+  border-left: 3px solid var(--amber);
+  border-radius: 0 6px 6px 0;
+  background: var(--blue-soft);
+  color: var(--ink);
+  line-height: 1.6;
+}
+.kanji-story > strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+.inline-reference .kanji-story { margin-inline: 0; }
+.study-pair-lesson-card .kanji-story { margin: 12px 0 0; text-align: left; }
 .reference-overview h2 { margin: 0; font-size: 36px; }
 .reference-overview dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 15px; margin: 16px 0 0; }
 .reference-overview dt, .reference-note, .reference-sources { color: var(--muted); font-size: 13px; line-height: 1.6; }
@@ -3947,4 +3972,330 @@ button.stat-metric:focus-visible {
 @media (max-width: 520px) {
   .inline-kanji-grid { grid-template-columns: 1fr; }
   .inline-reference .reference-section:has(.reference-comparison) { grid-template-columns: 1fr; }
+}
+
+.study-pair-home {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px 24px;
+  margin-top: 14px;
+}
+
+.study-pair-home h2 {
+  margin: 0;
+  font-size: 19px;
+}
+
+.study-pair-home p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.study-pair-home p:empty {
+  display: none;
+}
+
+@media (max-width: 620px) {
+  .study-pair-home {
+    grid-template-columns: 1fr;
+  }
+}
+
+.study-pair-picker {
+  margin-top: 12px;
+}
+
+.study-pair-picker > summary {
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.study-pair-picker > summary:hover {
+  border-color: var(--ink);
+}
+
+.study-pair-search {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  text-align: left;
+}
+
+.study-pair-search label,
+.study-pair-status,
+.study-pair-saved,
+[data-study-pair-matches] > p {
+  font-size: 13px;
+}
+
+.study-pair-search input {
+  min-width: 0;
+  font-size: 16px;
+}
+
+.study-pair-status:empty,
+.study-pair-saved:empty {
+  display: none;
+}
+
+.study-pair-matches,
+.study-pair-list {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.study-pair-matches button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  justify-items: start;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+}
+
+.study-pair-matches strong {
+  font-size: 26px;
+  font-weight: 600;
+}
+
+.study-pair-matches button div,
+.study-pair-entries div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.study-pair-matches small,
+.study-pair-entries small,
+.study-pair-round-heading > span {
+  color: var(--muted);
+}
+
+.study-pair-main {
+  max-width: 720px;
+}
+
+.study-pair-main h2 {
+  font-size: 20px;
+}
+
+.study-pair-list > li {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  padding: 12px;
+}
+
+.study-pair-list-actions {
+  margin-top: 10px;
+}
+
+.study-pair-entries,
+.study-pair-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.study-pair-entries > div {
+  padding: 8px;
+}
+
+.study-pair-entries strong {
+  font-size: 32px;
+  line-height: 1.2;
+}
+
+.study-pair-round-heading,
+.study-pair-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.study-pair-round-heading {
+  justify-content: space-between;
+}
+
+.study-pair-prompt {
+  margin: 22px 0;
+}
+
+.study-pair-prompt p {
+  margin: 0;
+  font-size: clamp(24px, 5vw, 40px);
+  font-weight: 700;
+}
+
+.study-pair-choices {
+  margin-bottom: 16px;
+}
+
+.study-pair-choices[hidden] {
+  display: none;
+}
+
+.study-pair-choices > * {
+  padding: 12px;
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: clamp(25px, 6vw, 52px);
+  text-align: center;
+}
+
+.study-pair-choices small {
+  font-size: 0.45em;
+}
+
+.study-pair-correct {
+  background: var(--green-soft);
+}
+
+.study-pair-result {
+  font-weight: 700;
+}
+
+[data-pair-feedback] button {
+  margin-top: 16px;
+}
+
+
+.study-pair-lesson-title {
+  margin: 22px 0 12px;
+}
+
+.study-pair-cue {
+  padding: 12px 14px;
+  border-left: 3px solid var(--ink);
+  margin: 0 0 12px;
+  background: var(--blue-soft);
+  line-height: 1.5;
+}
+
+.study-pair-lesson-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(8px, 2vw, 14px);
+}
+
+.study-pair-lesson-card {
+  min-width: 0;
+  padding: clamp(10px, 3vw, 20px);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  overflow-wrap: anywhere;
+}
+
+.study-pair-lesson-face {
+  display: grid;
+  justify-items: start;
+  align-content: center;
+  min-height: 78px;
+}
+
+.study-pair-lesson-face .reference-diagram {
+  width: min(100%, 118px);
+}
+
+.study-pair-lesson-face .reference-glyph {
+  font-size: clamp(48px, 10vw, 90px);
+}
+
+.study-pair-spelling {
+  font-size: clamp(24px, 6vw, 45px);
+}
+
+.study-pair-spelling mark {
+  border-radius: 3px;
+  background: #ffecb5;
+  color: inherit;
+}
+
+.study-pair-lesson-reading,
+.study-pair-lesson-meaning {
+  margin: 8px 0;
+}
+
+.study-pair-radical,
+.study-pair-components,
+.study-pair-example {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.study-pair-radical {
+  margin: 14px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.study-pair-radical > span:first-child {
+  color: var(--muted);
+}
+
+.study-pair-components {
+  margin: 6px 0 0;
+  padding-left: 16px;
+}
+
+.study-pair-example {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.study-pair-example p {
+  margin: 0 0 4px;
+}
+
+.study-pair-lesson-actions {
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
+
+.study-group-links {
+  margin-top: 12px;
+}
+
+.study-group-links ul {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.study-group-links li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+
+@media (min-width: 621px) {
+  .study-pair-entries:has(> :nth-child(3)),
+  .study-pair-choices:has(> :nth-child(3)),
+  .study-pair-lesson-grid:has(> :nth-child(3)) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .study-pair-entries:has(> :nth-child(4)),
+  .study-pair-choices:has(> :nth-child(4)),
+  .study-pair-lesson-grid:has(> :nth-child(4)) {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
