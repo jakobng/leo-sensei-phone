@@ -2042,8 +2042,53 @@ var directVocabularyEntries = (card, index) => {
   }] : [])(matchingWordSenses(card, word, forms, wantedReadings)));
 };
 var vocabularyEntries = (card, index) => ((direct) => direct.length ? direct : (referenceSupplement(card, index.data)?.lookups ?? []).flatMap((lookup) => directVocabularyEntries(lookup, index).map((entry) => ({ ...entry, relationship: lookup.relationship }))))(directVocabularyEntries(card, index));
-var studyReference = ({ card, index, lexicon = {}, studied = /* @__PURE__ */ new Set() }) => {
+var groupedSimilar = ({ card, literal, index, lexicon, studied, groups = [] }) => {
+  if (!groups.length) return [];
+  if (card.type === "kanji") {
+    const group2 = groups.find((candidate) => candidate.type === "kanji" && candidate.items.some((entry) => entry.id === literal || text2(entry.item) === literal));
+    if (!group2) return [];
+    return group2.items.filter((member) => member.id !== literal && text2(member.item) !== literal).map((member) => {
+      const memberItem = text2(member.item);
+      const summary = kanjiSummary(memberItem, index, lexicon, studied);
+      const raw = kanjiEntry(memberItem, index, lexicon);
+      return {
+        ...summary,
+        reading: summary.reading || unique2(member.readings ?? []).join(" \xB7 "),
+        readings: unique2([...raw.onReadings ?? [], ...raw.kunReadings ?? [], ...member.readings ?? []]),
+        meanings: summary.meanings.length ? summary.meanings : member.meanings ?? [],
+        inGroup: true
+      };
+    });
+  }
+  const cardReading = normalizeKana(card.reading ?? card.readings?.[0] ?? "");
+  const matchesEntry = (entry) => card.id ? entry.id === card.id : text2(entry.item) === literal && (!cardReading || (entry.readings ?? []).some((r) => normalizeKana(r) === cardReading));
+  const group = groups.find((candidate) => candidate.type === "vocabulary" && candidate.items.some(matchesEntry));
+  if (!group) return [];
+  return group.items.filter((member) => !matchesEntry(member)).map((member) => {
+    const memberItem = text2(member.item);
+    const isSingleKanji = /^\p{Script=Han}$/u.test(memberItem);
+    const kanjiData = isSingleKanji ? kanjiEntry(memberItem, index, lexicon) : null;
+    const readings = unique2(member.readings ?? []);
+    return {
+      id: member.id,
+      item: memberItem,
+      type: "vocabulary",
+      reading: readings.join(" \xB7 "),
+      readings,
+      meanings: member.meanings ?? [],
+      studied: studied.has(memberItem) || studied.has(member.id),
+      inGroup: true,
+      ...isSingleKanji && kanjiData?.components?.length ? {
+        parts: unique2(kanjiData.components.map((part) => part.literal)),
+        diagram: kanjiData.components
+      } : {}
+    };
+  });
+};
+var studyReference = ({ card, index, lexicon = {}, studied = /* @__PURE__ */ new Set(), groups = [] }) => {
   const literal = text2(card.item);
+  const grouped = groupedSimilar({ card, literal, index, lexicon, studied, groups });
+  const groupedItems = new Set(grouped.map(({ item }) => item));
   const common = {
     item: literal,
     type: card.type,
@@ -2057,6 +2102,7 @@ var studyReference = ({ card, index, lexicon = {}, studied = /* @__PURE__ */ new
     entries: vocabularyEntries(card, index),
     referenceNote: referenceSupplement(card, index.data)?.note ?? "",
     phraseExamples: referenceSupplement(card, index.data)?.examples ?? [],
+    similar: grouped,
     components: kanjiIn(literal).map((ch) => kanjiSummary(ch, index, lexicon, studied, true))
   } : ((entry) => ((phonetic) => ({
     ...common,
@@ -2072,8 +2118,11 @@ var studyReference = ({ card, index, lexicon = {}, studied = /* @__PURE__ */ new
       item: part.original || index.data.radicals?.[part.literal]?.base || part.literal,
       meaning: index.data.radicals?.[part.literal]?.meaning ?? index.data.kanji?.[part.original || part.literal]?.meanings?.[0] ?? (part.literal === entry.radicalInfo?.literal ? entry.radicalInfo?.meaning : "Component")
     })),
-    similar: (entry.similar ?? []).map((ch) => kanjiSummary(ch, index, lexicon, studied)).toSorted((a, b) => Number(b.studied) - Number(a.studied)).slice(0, 12),
-    sharedComponents: unique2(componentNames(entry).flatMap((part) => index.byPart.get(part) ?? [])).filter((ch) => ch !== literal && !(entry.similar ?? []).includes(ch)).map((ch) => ({
+    similar: [
+      ...grouped,
+      ...(entry.similar ?? []).filter((ch) => ch !== literal && !groupedItems.has(ch)).map((ch) => kanjiSummary(ch, index, lexicon, studied)).toSorted((a, b) => Number(b.studied) - Number(a.studied)).slice(0, Math.max(0, 12 - grouped.length))
+    ],
+    sharedComponents: unique2(componentNames(entry).flatMap((part) => index.byPart.get(part) ?? [])).filter((ch) => ch !== literal && !(entry.similar ?? []).includes(ch) && !groupedItems.has(ch)).map((ch) => ({
       ...kanjiSummary(ch, index, lexicon, studied),
       shared: componentNames(entry).filter((part) => componentNames(index.data.kanji[ch]).includes(part))
     })).toSorted((a, b) => Number(b.studied) - Number(a.studied) || b.shared.length - a.shared.length).slice(0, 8),
@@ -3842,7 +3891,11 @@ var apiHandler = ({
   const reference = () => referenceIndex ? Promise.resolve(referenceIndex) : readStudyReference(referenceFile);
   const cardReference = (card) => referenceIndex ? reference() : readReferenceForCard(referenceFile, card);
   const studiedItems = (context) => new Set(context.catalog.cards.filter((card) => context.cardStates.cardsById?.[card.id]?.known || Number.isInteger(context.cardStates.cardsById?.[card.id]?.stage)).map((card) => card.item));
-  const referenceContext = (context) => ({ kanjiLexicon: context.kanjiLexicon, studied: studiedItems(context) });
+  const referenceContext = (context) => ({
+    kanjiLexicon: context.kanjiLexicon,
+    studied: studiedItems(context),
+    groups: studyGroups(savedStudyPairs(context.events ?? []).values())
+  });
   const confusionsFor = (card, feedback, context, index) => likelyConfusions({
     card,
     feedback,
@@ -3933,7 +3986,7 @@ var apiHandler = ({
     ...event,
     eventId: randomUUID(),
     occurredAt: now()
-  }, (result) => result.ok ? sendJson(response, status, value) : sendJson(response, 503, { error: "SAVE_FAILED", message: "Could not save this change. Try again." }));
+  }, (result) => result.ok ? (recentReviewReferences.clear(), sendJson(response, status, value)) : sendJson(response, 503, { error: "SAVE_FAILED", message: "Could not save this change. Try again." }));
   const saveStudyPair = () => readJsonBody(request, (result) => {
     const { type, item, other } = result.value ?? {};
     const key = typeof item === "string" && typeof other === "string" && studyPairKey(type, item, other);
@@ -3990,11 +4043,12 @@ var apiHandler = ({
   const getProgressItems = (type, bandId) => load((loaded) => ((result) => !loaded.ok ? sendJson(response, 503, { error: "STATE_UNAVAILABLE", message: loaded.error }) : result.ok ? sendJson(response, 200, result.value) : sendJson(response, 404, { error: "PROGRESS_CATEGORY_NOT_FOUND", message: result.error }))(
     loaded.ok ? progressItems(loaded.value, type, bandId) : loaded
   ));
-  const sendReference = (card, { kanjiLexicon, studied }, decorate = (detail) => detail) => cardReference(card).then((index) => sendJson(response, 200, decorate(studyReference({
+  const sendReference = (card, { kanjiLexicon, studied, groups = [] }, decorate = (detail) => detail) => cardReference(card).then((index) => sendJson(response, 200, decorate(studyReference({
     card,
     index,
     lexicon: kanjiLexicon,
-    studied
+    studied,
+    groups
   }), index))).catch(() => sendJson(response, 503, { error: "REFERENCE_UNAVAILABLE", message: "The study reference could not be loaded. Close this panel and try again." }));
   const getKanji = () => ((literal) => !/^[\p{Script=Han}⺀-⻳]$/u.test(literal) ? sendJson(response, 400, { error: "INVALID_KANJI" }) : load((result) => !result.ok ? sendJson(response, 503, { error: "STATE_UNAVAILABLE", message: result.error }) : sendReference({ item: literal, type: "kanji" }, referenceContext(result.value))))(String(url.searchParams.get("literal") ?? ""));
   const sendCardReference = (card, context, decorate) => !card ? sendJson(response, 404, { error: "CARD_NOT_FOUND" }) : !card.item || [...card.item].length > 128 || !["kanji", "vocabulary"].includes(card.type) ? sendJson(response, 400, { error: "INVALID_REFERENCE_ITEM" }) : sendReference(card, context, decorate);
@@ -4540,7 +4594,7 @@ isMain ? createReviewServer().listen(
 // web/worker.mjs
 var scope = new URL(self.registration.scope);
 var cachePrefix = `leo-sensei:${scope.href}:`;
-var cacheName = cachePrefix + "234663f3af3568f6f731bfc0";
+var cacheName = cachePrefix + "1553a1c26d00b13218c5c1e1";
 var assets = define_ASSETS_default.map((path) => new URL(path, scope).href);
 var shell = new URL("index.html", scope);
 var handle = createReviewServer({

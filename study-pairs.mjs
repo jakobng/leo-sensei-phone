@@ -63,7 +63,7 @@ export const bindStudyPairHome = (pane, fetchValue) => {
 };
 
 
-export const bindStudyPairPicker = (picker, { fetchValue, type, item, label, hint }) => {
+export const bindStudyPairPicker = (picker, { fetchValue, type, item, label, hint, onChange }) => {
   const input = picker.querySelector("input");
   const results = picker.querySelector("[data-study-pair-matches]");
   const savedList = picker.querySelector("[data-study-pair-saved]");
@@ -101,6 +101,7 @@ export const bindStudyPairPicker = (picker, { fetchValue, type, item, label, hin
         return;
       }
       remember(result.value.group);
+      onChange?.(result.value.group);
       if (input.value === query) {
         input.value = "";
         showHint();
@@ -194,7 +195,7 @@ const groupsMarkup = (groups) => groups.length ? `
     </li>`).join("")}</ul>`
   : "<p>On any kanji or vocabulary answer, use <strong>Group with other kanji</strong> or <strong>Group with other words</strong> to save a group here.</p>";
 
-export const bindStudyPairPage = (panel, { fetchValue, mode, speak }) => {
+export const bindStudyPairPage = (panel, { fetchValue, mode, speak, onChange }) => {
   const lessons = new Map();
   let groups = [];
   let questions = [];
@@ -228,6 +229,7 @@ export const bindStudyPairPage = (panel, { fetchValue, mode, speak }) => {
     fetchValue(path, jsonMutationOptions("DELETE", { key })).then((result) => {
       if (!panel.isConnected) return;
       if (result.ok) {
+        onChange?.();
         load("groups", true);
       } else {
         buttons.forEach((candidate) => { candidate.disabled = false; });

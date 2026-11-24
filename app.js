@@ -7,7 +7,9 @@ import {
 } from "./speech.mjs";
 import { gatedApplicationOptions, onboardingSettings } from "./onboarding-core.mjs";
 import { initialUiState, reduceUi, reviewReserve } from "./ui-core.mjs";
-import { confusionMarkup, inlineReferenceMarkup, referenceContentMarkup } from "./reference-content.mjs";
+import {
+  comparisonKey, confusionMarkup, groupCompareBannerMarkup, inlineReferenceMarkup, referenceContentMarkup,
+} from "./reference-content.mjs";
 import { jsonMutationOptions } from "./http.mjs";
 import {
   bindStudyPairHome, bindStudyPairPage, bindStudyPairPicker, studyPairHomeMarkup, studyPairPickerMarkup, studyPairTarget,
@@ -27,6 +29,28 @@ const heardLessonCardIds = new Set();
 const feedbackReferences = new Map();
 const pendingFeedbackReferences = new Map();
 const answerConfusions = new Map();
+const autoOpenedAnswers = new Set();
+
+const kanaKey = (value) => String(value ?? "").normalize("NFKC").replace(/[.\-\s]/gu, "")
+  .replace(/[ァ-ヶ]/gu, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0x60));
+const meaningKey = (value) => String(value ?? "").normalize("NFKC").trim().toLowerCase();
+
+const defaultOpenComparisons = (reference, feedback, answerKey) => {
+  if (feedback?.correct !== false || !answerKey || autoOpenedAnswers.has(answerKey)) return [];
+  const grouped = (reference?.similar ?? []).filter((other) => other.inGroup);
+  if (!grouped.length) return [];
+  autoOpenedAnswers.add(answerKey);
+  if (autoOpenedAnswers.size > 8) autoOpenedAnswers.delete(autoOpenedAnswers.keys().next().value);
+  const submittedReading = kanaKey(feedback.submittedReading);
+  const submittedMeaning = meaningKey(feedback.submittedMeaning);
+  const submittedReverse = String(feedback.submittedReverse ?? "").normalize("NFKC").trim();
+  const chosen = grouped.find((other) =>
+    (submittedReading && (other.readings ?? String(other.reading ?? "").split(" · ")).some((r) => kanaKey(r) === submittedReading))
+    || (submittedMeaning && (other.meanings ?? []).some((m) => meaningKey(m) === submittedMeaning))
+    || (submittedReverse && other.item === submittedReverse),
+  ) ?? grouped[0];
+  return [comparisonKey(chosen)];
+};
 
 const escapeHtml = (value) =>
   String(value ?? "")
@@ -264,6 +288,7 @@ const feedbackMarkup = (state, reference = null, comparisonOpen = []) => {
           ${feedback.submittedReading || feedback.submittedMeaning ? "" : answerResult("Japanese", feedback.submittedReverse, feedback.correct)}</div>
       </div>
       <div class="feedback-tools">${state.daily.speechAvailable ? `<button id="audioButton" class="audio-button" type="button" title="Play Japanese pronunciation"><span aria-hidden="true">▶</span><span>Hear again</span></button>` : ""}</div>
+      <div class="group-compare-slot" data-group-compare-banner>${reference ? groupCompareBannerMarkup(reference, { wrong: feedback.correct === false }) : ""}</div>
       ${lookingBack ? '<div class="feedback-actions single"><button id="returnToReviewButton" class="primary-button continue-button" type="button" data-enter-next>Return to review</button></div>' : `
       <details class="feedback-editor" ${state.aliasSaving || feedback.aliasSaved || state.savedAlias?.cardId === state.currentId ? "open" : ""}>
         <summary>Edit accepted answers</summary>
@@ -283,7 +308,7 @@ const feedbackMarkup = (state, reference = null, comparisonOpen = []) => {
     <section class="feedback-reference" aria-label="Study notes">
       <header><h2>Study notes</h2></header>
       <div id="feedbackReference" data-reference-card-id="${escapeHtml(cardId)}">${reference
-        ? inlineReferenceMarkup({ ...reference, comparisonOpen })
+        ? inlineReferenceMarkup({ ...reference, comparisonOpen, wrong: feedback.correct === false })
         : '<p class="inline-reference-loading" role="status">Loading study notes…</p>'}</div>
     </section></div>`;
 };
@@ -898,15 +923,29 @@ const bindReferenceLinks = (container, state) => [...container.querySelectorAll(
         : { type: "reference_failed", requestKey: query, error: result.error })));
   }));
 
-const feedbackReferenceRequest = (cardId, answerEventId) => {
-  const browserNotes = browserBuild && answerEventId;
+const bindGroupCompareBanner = (container) => {
+  container?.querySelectorAll("[data-open-comparison]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.dataset.openComparison;
+      const details = [...root.querySelectorAll("#feedbackReference [data-comparison]")]
+        .find((node) => node.dataset.comparison === key);
+      if (!details) return;
+      details.open = true;
+      details.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      details.querySelector("summary")?.focus({ preventScroll: true });
+    });
+  });
+};
+
+const feedbackReferenceRequest = (cardId, answerEventId, { forceReload = false } = {}) => {
+  const browserNotes = browserBuild && answerEventId && !forceReload;
   const key = browserNotes ? answerEventId : cardId;
-  const query = new URLSearchParams({ id: cardId, ...(answerEventId ? { answer: answerEventId } : {}) });
-  const cached = pendingFeedbackReferences.get(key);
+  const query = new URLSearchParams({ id: cardId, ...(!forceReload && answerEventId ? { answer: answerEventId } : {}) });
+  const cached = !forceReload && pendingFeedbackReferences.get(key);
   if (cached) return cached;
   const pending = (browserNotes ? fetchValue(`/api/review/notes?${query}`).then((result) => result.code === "ANSWER_NOT_CACHED"
     ? fetchValue(`/api/reference?${query}`) : result) : fetchValue(`/api/reference?${query}`)).then((result) => {
-    pendingFeedbackReferences.delete(key);
+    if (pendingFeedbackReferences.get(key) === pending) pendingFeedbackReferences.delete(key);
     if (result.ok) {
       feedbackReferences.set(cardId, result.value);
       feedbackReferences.size > 4 ? feedbackReferences.delete(feedbackReferences.keys().next().value) : null;
@@ -921,18 +960,31 @@ const feedbackReferenceRequest = (cardId, answerEventId) => {
   return pending;
 };
 
-const loadFeedbackReference = (target, state) => {
+const loadFeedbackReference = (target, state, { forceReload = false } = {}) => {
   const { cardId, feedback } = displayedAnswer(state);
-  const alreadyLoaded = feedbackReferences.has(cardId);
-  if (!alreadyLoaded) target.innerHTML = '<p class="inline-reference-loading" role="status">Loading study notes…</p>';
-  return feedbackReferenceRequest(cardId, feedback?.answerEventId).then((result) => {
+  const alreadyLoaded = !forceReload && feedbackReferences.has(cardId);
+  const openBefore = forceReload
+    ? [...target.querySelectorAll("[data-comparison][open]")].map((node) => node.dataset.comparison)
+    : [];
+  if (!alreadyLoaded && !forceReload) target.innerHTML = '<p class="inline-reference-loading" role="status">Loading study notes…</p>';
+  return feedbackReferenceRequest(cardId, feedback?.answerEventId, { forceReload }).then((result) => {
     // A late note must never restore a previous review or overwrite a newer screen.
     if (root.querySelector("#feedbackReference") !== target) return;
+    const answerKey = feedback?.answerEventId ?? (cardId ? `${cardId}:${feedback?.correct}` : null);
     if (!alreadyLoaded) {
-      target.innerHTML = result.ok ? inlineReferenceMarkup(result.value)
+      const comparisonOpen = forceReload
+        ? openBefore
+        : result.ok ? defaultOpenComparisons(result.value, feedback, answerKey) : [];
+      target.innerHTML = result.ok
+        ? inlineReferenceMarkup({ ...result.value, comparisonOpen, wrong: feedback?.correct === false })
         : '<p class="inline-reference-loading">Study notes could not load. <button class="quiet-button" type="button" data-feedback-reference-retry>Retry</button></p>';
       bindReferenceLinks(target, state);
-      target.querySelector("[data-feedback-reference-retry]")?.addEventListener("click", () => loadFeedbackReference(target, state));
+      target.querySelector("[data-feedback-reference-retry]")?.addEventListener("click", () => loadFeedbackReference(target, state, { forceReload }));
+    }
+    const banner = root.querySelector("[data-group-compare-banner]");
+    if (banner && result.ok) {
+      banner.innerHTML = groupCompareBannerMarkup(result.value, { wrong: feedback?.correct === false });
+      bindGroupCompareBanner(banner);
     }
     const heading = root.querySelector(".feedback-heading");
     const matches = answerConfusions.get(feedback?.answerEventId);
@@ -951,9 +1003,16 @@ const render = (state) => {
   activityResizeObserver?.disconnect();
   const returningFromReference = Boolean(root.querySelector("#kanjiDialog") && !state.kanjiDetail);
   const { cardId: displayedCardId, feedback: visibleFeedback } = displayedAnswer(state);
-  const comparisonOpen = root.querySelector("#feedbackReference")?.dataset.referenceCardId === displayedCardId
-    ? [...root.querySelectorAll("#feedbackReference [data-comparison][open]")].map((node) => node.dataset.comparison) : [];
-  root.innerHTML = state.daily && state.settings ? pageMarkup(state, feedbackReferences.get(displayedCardId), comparisonOpen) : '<div class="loading">Loading today’s session</div>';
+  const sameReferenceCard = root.querySelector("#feedbackReference")?.dataset.referenceCardId === displayedCardId;
+  const cachedReference = feedbackReferences.get(displayedCardId);
+  const answerKey = visibleFeedback?.answerEventId ?? (displayedCardId ? `${displayedCardId}:${visibleFeedback?.correct}` : null);
+  const comparisonOpen = sameReferenceCard
+    ? [...root.querySelectorAll("#feedbackReference [data-comparison][open]")].map((node) => node.dataset.comparison)
+    : cachedReference
+      ? defaultOpenComparisons(cachedReference, visibleFeedback, answerKey)
+      : [];
+  root.innerHTML = state.daily && state.settings ? pageMarkup(state, cachedReference, comparisonOpen) : '<div class="loading">Loading today’s session</div>';
+  bindGroupCompareBanner(root);
   const grammarPending = root.querySelector("[data-grammar-pending]");
   const checkGrammar = () => fetchValue("/api/daily").then(({ ok, value }) =>
     ok && root.querySelector("[data-grammar-pending]") === grammarPending
@@ -985,13 +1044,21 @@ const render = (state) => {
   if (studyPairHome) bindStudyPairHome(studyPairHome, fetchValue);
   const studyPairPage = root.querySelector("[data-study-pair-page]");
   if (studyPairPage) bindStudyPairPage(studyPairPage, {
-    fetchValue, mode: state.studyPairMode, speak: state.daily.speechAvailable ? speak : null,
+    fetchValue,
+    mode: state.studyPairMode,
+    speak: state.daily.speechAvailable ? speak : null,
+    onChange: () => feedbackReferences.clear(),
   });
   const picker = root.querySelector("[data-study-pair-picker]");
   if (picker) bindStudyPairPicker(picker, {
     fetchValue,
     ...studyPairTarget({ cardId: displayedCardId, feedback: visibleFeedback }),
     hint: () => (answerConfusions.get(visibleFeedback.answerEventId) ?? visibleFeedback.confusions)?.[0],
+    onChange: () => {
+      feedbackReferences.delete(displayedCardId);
+      const target = root.querySelector("#feedbackReference");
+      if (target) loadFeedbackReference(target, state, { forceReload: true });
+    },
   });
   root.querySelector("#finishEarlyButton")?.addEventListener("click", () => transition({ type: "summary_opened" }));
   root.querySelector("#resumeButton")?.addEventListener("click", () => transition({ type: "summary_closed" }));
